@@ -1,0 +1,12 @@
+<svg width="200" height="200" xmlns="http://www.w3.org/2000/svg" stroke="null">
+ <g stroke="null">
+  <title stroke="null">Layer 1</title>
+  <text fill="#000000" x="252.24234" y="252.725" id="svg_1" font-size="24" font-family="'Newsreader'" text-anchor="start" xml:space="preserve" transform="rotate(0.136508 102.451 103.32) matrix(7.40755 0 0 6.11502 -1833.87 -1407.53)" stroke="#000" stroke-width="0.2">D</text>
+  <path fill="#000000" stroke="#000" stroke-width="0" opacity="NaN" d="m774.39998,203.6l-14.39998,-34.6l14.39998,34.6z" id="svg_3"/>
+  <ellipse stroke="#000" fill="#000000" stroke-width="0" cx="100.99999" cy="191.69999" id="svg_6" rx="117" ry="34.5"/>
+  <ellipse fill="#000000" stroke="#000" stroke-width="0" cx="122.49999" cy="219.69999" id="svg_7" rx="9.5" ry="1.5"/>
+  <path id="svg_8" d="m-74.00002,-25.80001l343,0l0,43l-343,0l0,-43z" opacity="undefined" stroke-width="0.2" stroke="#000" fill="#000000"/>
+  <rect fill="#000000" stroke="#000" stroke-width="0.2" x="439.99999" y="94.19999" width="3" height="9" id="svg_9"/>
+ </g>
+
+</svg>

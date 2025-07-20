@@ -1,0 +1,9 @@
+.app-showcase {
+  position: relative;
+  overflow: hidden; 
+}
+
+.app-showcase .showcaselayout {
+  position: relative;
+  z-index: 1; 
+}
