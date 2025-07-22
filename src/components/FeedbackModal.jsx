@@ -135,7 +135,7 @@ export const FeedbackModal = ({ feedbackData, userRole, onClose }) => {
             />
             <ScoreCard
               title="POI Handling"
-              score={"N/A"}
+              score={feedbackData.poiHandling.score}
               feedback={feedbackData.poiHandling.feedback}
               icon={<MessageSquareQuote />}
             />
