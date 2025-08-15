@@ -6,6 +6,39 @@ import { FeedbackModal } from "./components/FeedbackModal";
 
 // --- Helper Components (Self-contained & Themed) ---
 
+// --- NEW HELPER COMPONENT for displaying selected files ---
+const FileListDisplay = ({ files, onRemoveFile }) => {
+  if (files.length === 0) {
+    return (
+      <p className="text-center text-sm text-gray-500 py-2 px-4 border-2 border-dashed border-gray-700 rounded-lg">
+        Upload optional reference papers (.pdf, .txt) for the AI debaters.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-2 max-h-32 overflow-y-auto p-2 border border-gray-700 rounded-lg">
+      {files.map((file, index) => (
+        <div
+          key={index}
+          className="flex items-center justify-between bg-gray-800 p-2 rounded"
+        >
+          <span className="text-sm text-gray-300 truncate" title={file.name}>
+            {file.name}
+          </span>
+          <button
+            type="button"
+            onClick={() => onRemoveFile(index)}
+            className="text-red-500 hover:text-red-400 ml-2"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+};
+
 const ParticipantBox = ({ name, role, isSpeaking, statusText, isUser }) => (
   <div
     className={`relative flex flex-col items-center justify-center p-4 rounded-xl bg-gray-900 border border-gray-800/80 shadow-sm shadow-white-50/80 transition-all duration-300 min-h-[160px] ${
@@ -106,8 +139,11 @@ const DebatePage = () => {
     "Is social media beneficial for society?"
   );
   const [debateLevel, setDebateLevel] = useState("beginner");
-  // MODIFICATION: Renamed to parliamentType for clarity as requested
   const [parliamentType, setParliamentType] = useState("asian");
+
+  // --- NEW STATES FOR FILE UPLOAD ---
+  const [files, setFiles] = useState([]);
+  const [isUploading, setIsUploading] = useState(false);
 
   const [messages, setMessages] = useState([]);
   const [isRecording, setIsRecording] = useState(false);
@@ -131,7 +167,6 @@ const DebatePage = () => {
     Date.now().toString() + Math.random().toString(36).substr(2, 9)
   );
 
-  // --- MODIFICATION: Dynamically select participants based on parliamentType ---
   const DEBATE_PARTICIPANTS =
     parliamentType === "british"
       ? BRITISH_DEBATE_PARTICIPANTS
@@ -175,12 +210,9 @@ const DebatePage = () => {
       return;
     }
 
-    // MODIFICATION: Use absolute URL to fetch from correct server port
-    // This requires the server to have CORS enabled for the frontend's origin.
     const port = parliamentType === "british" ? "3002" : "3001";
     const host = window.location.hostname;
     const audioUrl = `http://${host}:${port}/api/tts-audio/${sessionId}`;
-
     audioRef.current.src = audioUrl;
 
     const words = fullText.split(/\s+/);
@@ -191,12 +223,9 @@ const DebatePage = () => {
         setCaption(fullText);
         return;
       }
-
       const timePerWord = (duration * 1000) / words.length;
       let wordIndex = 0;
-
       if (captionTimerRef.current) clearInterval(captionTimerRef.current);
-
       captionTimerRef.current = setInterval(() => {
         if (wordIndex >= words.length) {
           clearInterval(captionTimerRef.current);
@@ -249,19 +278,16 @@ const DebatePage = () => {
           setCaption("Microphone is live. You may begin speaking.");
         }
         break;
-
       case "agent_thinking":
         setThinkingAgent(data.assistant);
         setActiveSpeaker("");
         setIsUserTurn(false);
         break;
-
       case "user_turn":
         setThinkingAgent("");
         setActiveSpeaker("");
         setIsUserTurn(true);
         break;
-
       case "start_immediate_playback":
         stopCurrentAudio();
         setThinkingAgent("");
@@ -277,16 +303,15 @@ const DebatePage = () => {
         ]);
         playAndCaptionAudio(data.sessionId, data.response, data.assistant);
         break;
-
       case "transcript":
-        const liveText = data.data.channel?.alternatives?.[0]?.transcript || "";
+        const liveText =
+          data.data.channel?.alternatives?.[0]?.transcript || "";
         const isFinal = data.data.is_final;
         setCaption(transcriptRef.current + " " + liveText);
         if (isFinal && liveText.trim()) {
           transcriptRef.current += " " + liveText.trim();
         }
         break;
-
       case "user_speech_final":
         setMessages((prev) => [
           ...prev,
@@ -299,7 +324,6 @@ const DebatePage = () => {
         ]);
         setCaption("");
         break;
-
       case "debate_end":
         setCaption("The debate has concluded. You may now request feedback.");
         setIsUserTurn(false);
@@ -313,11 +337,9 @@ const DebatePage = () => {
     setIsFeedbackLoading(true);
     setFeedbackData(null);
     try {
-      // MODIFICATION: Use absolute URL to fetch from correct server port
       const port = parliamentType === "british" ? "3002" : "3001";
       const host = window.location.hostname;
       const apiUrl = `http://${host}:${port}/api/get-feedback`;
-
       const response = await fetch(apiUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -338,13 +360,11 @@ const DebatePage = () => {
 
   const startRecording = async () => {
     if (isRecording || isMicWarmingUp) return;
-
     setIsMicWarmingUp(true);
     setCaption("Connecting microphone, please wait...");
     stopCurrentAudio();
     transcriptRef.current = "";
     setActiveSpeaker(userRole);
-
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true },
@@ -379,7 +399,9 @@ const DebatePage = () => {
     if (mediaRecorderRef.current?.state === "recording") {
       mediaRecorderRef.current.stop();
       if (socketRef.current?.readyState === WebSocket.OPEN) {
-        socketRef.current.send(JSON.stringify({ type: "user_stop_recording" }));
+        socketRef.current.send(
+          JSON.stringify({ type: "user_stop_recording" })
+        );
       }
     }
     mediaRecorderRef.current?.stream
@@ -400,12 +422,62 @@ const DebatePage = () => {
     }
   };
 
-  const handleRoleSubmit = (e) => {
+  // --- NEW FILE HANDLING FUNCTIONS ---
+  const handleFileChange = (e) => {
+    const newFiles = Array.from(e.target.files);
+    setFiles((prevFiles) => [...prevFiles, ...newFiles]);
+  };
+
+  const handleRemoveFile = (indexToRemove) => {
+    setFiles((prevFiles) =>
+      prevFiles.filter((_, index) => index !== indexToRemove)
+    );
+  };
+
+  const handleRoleSubmit = async (e) => {
     e.preventDefault();
     if (!userRole) {
       alert("Please select a role");
       return;
     }
+
+    setIsUploading(true);
+
+    // --- FILE UPLOAD LOGIC ---
+    if (files.length > 0) {
+      const formData = new FormData();
+      formData.append("clientId", clientIdRef.current);
+      files.forEach((file) => {
+        formData.append("papers", file); // 'papers' must match the field name in multer
+      });
+
+      try {
+        const port = parliamentType === "british" ? "3002" : "3001";
+        const host = window.location.hostname;
+        const uploadUrl = `http://${host}:${port}/api/upload-papers`;
+
+        const response = await fetch(uploadUrl, {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.message || "File upload failed.");
+        }
+        console.log("Files uploaded successfully.");
+      } catch (error) {
+        console.error("Upload error:", error);
+        alert(`Error uploading files: ${error.message}`);
+        setIsUploading(false);
+        return; // Stop if upload fails
+      }
+    }
+    // --- END FILE UPLOAD LOGIC ---
+
+    setIsUploading(false);
+
+    // This part runs only after successful (or no) upload
     if (audioRef.current) {
       audioRef.current.muted = true;
       audioRef.current.play().catch(() => {});
@@ -416,9 +488,9 @@ const DebatePage = () => {
 
   useEffect(() => {
     if (view === "debate") {
-      // MODIFICATION: Logic to connect to the correct WebSocket port
       const port = parliamentType === "british" ? "3002" : "3001";
-      const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const wsProtocol =
+        window.location.protocol === "https:" ? "wss:" : "ws:";
       const wsHost = window.location.hostname;
       const wsUrl = `${wsProtocol}//${wsHost}:${port}`;
 
@@ -451,13 +523,17 @@ const DebatePage = () => {
       if (socketRef.current) socketRef.current.close();
       stopCurrentAudio();
     };
-  }, [view, userRole, parliamentType, debateTopic, debateLevel]); // Added dependencies
+  }, [view, userRole, parliamentType, debateTopic, debateLevel]);
 
   useEffect(() => {
     if (view !== "debate") return;
-
     const handleKeyDown = (e) => {
-      if (e.code === "Space" && !e.repeat && !isRecording && !isMicWarmingUp) {
+      if (
+        e.code === "Space" &&
+        !e.repeat &&
+        !isRecording &&
+        !isMicWarmingUp
+      ) {
         e.preventDefault();
         startRecording();
       }
@@ -503,14 +579,12 @@ const DebatePage = () => {
                   value={parliamentType}
                   onChange={(e) => {
                     setParliamentType(e.target.value);
-                    setUserRole(""); // MODIFICATION: Reset role when type changes
+                    setUserRole("");
                   }}
                   required
                   className="w-full p-4 rounded-lg bg-black-200 text-white text-lg focus:ring-2 focus:ring-white-50 outline-none"
                 >
-                  <option value="asian">
-                    Asian Parliamentary (7 Speakers)
-                  </option>
+                  <option value="asian">Asian Parliamentary (7 Speakers)</option>
                   <option value="british">
                     British Parliamentary (9 Speakers)
                   </option>
@@ -554,9 +628,8 @@ const DebatePage = () => {
                   className="w-full p-4 rounded-lg bg-black-200 text-white text-lg focus:ring-2 focus:ring-white-50 outline-none"
                 >
                   <option value="">-- Select Your Role --</option>
-                  {/* MODIFICATION: Dynamically generate roles */}
                   {Object.keys(DEBATE_PARTICIPANTS)
-                    .filter((name) => name !== "Moderator") // User cannot be the moderator
+                    .filter((name) => name !== "Moderator")
                     .map((name) => (
                       <option key={name} value={name}>
                         {name}
@@ -564,11 +637,39 @@ const DebatePage = () => {
                     ))}
                 </select>
               </div>
+
+              {/* --- NEW FILE UPLOAD SECTION --- */}
+              <div>
+                <label className="block text-lg font-medium mb-2 text-white">
+                  Reference Papers (Optional)
+                </label>
+                <FileListDisplay
+                  files={files}
+                  onRemoveFile={handleRemoveFile}
+                />
+                <label
+                  htmlFor="file-upload"
+                  className="mt-2 w-full text-center block cursor-pointer p-3 rounded-lg bg-black-200 hover:bg-black-50 text-white font-semibold"
+                >
+                  Add Files...
+                </label>
+                <input
+                  id="file-upload"
+                  type="file"
+                  multiple
+                  accept=".pdf,.txt"
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+              </div>
+              {/* --- END FILE UPLOAD SECTION --- */}
+
               <button
                 type="submit"
-                className="w-full bg-white-50 text-black font-semibold py-4 px-8 rounded-lg text-lg transition-colors hover:cursor-pointer hover:bg-black-200 hover:text-white-50"
+                disabled={isUploading}
+                className="w-full bg-white-50 text-black font-semibold py-4 px-8 rounded-lg text-lg transition-colors hover:cursor-pointer hover:bg-black-200 hover:text-white-50 disabled:bg-gray-600 disabled:cursor-not-allowed"
               >
-                Start Debate Session
+                {isUploading ? "Uploading Papers..." : "Start Debate Session"}
               </button>
             </form>
           </div>
@@ -581,9 +682,7 @@ const DebatePage = () => {
     ([name]) => name !== userRole
   );
 
-  // Helper: Determine if a participant is the active speaker
   const isAgentSpeaking = (name) => activeSpeaker === name;
-  // Helper: Determine if a participant is thinking
   const isAgentThinking = (name) => thinkingAgent === name;
 
   const getMicButtonTitle = () => {
@@ -595,7 +694,6 @@ const DebatePage = () => {
   return (
     <div className="min-h-screen bg-black text-white flex flex-col relative overflow-hidden">
       <audio ref={audioRef} autoPlay style={{ display: "none" }} />
-
       <header className="w-full p-6 text-center">
         <h1 className="text-2xl font-bold">
           {parliamentType === "british" ? "British" : "Asian"} Parliamentary
@@ -603,9 +701,7 @@ const DebatePage = () => {
         </h1>
         <p className="text-white-50">Today's Motion: "{debateTopic}"</p>
       </header>
-
       <main className="flex-grow w-full max-w-screen-2xl mx-auto px-4 md:px-8">
-        {/* MODIFICATION: Adjusted grid for up to 9 participants */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 md:gap-6">
           <ParticipantBox
             name={userRole}
@@ -625,11 +721,9 @@ const DebatePage = () => {
           ))}
         </div>
       </main>
-
       <div className="fixed bottom-28 md:bottom-32 left-1/2 -translate-x-1/2 w-full max-w-4xl px-4 flex items-center justify-center pointer-events-none z-30">
         <CaptionDisplay text={caption} />
       </div>
-
       <div className="fixed bottom-6 left-1/2 -translate-x-1/2 flex flex-col items-center z-20">
         <p className="text-sm mb-2 text-white-50">
           Hold{" "}
@@ -646,7 +740,6 @@ const DebatePage = () => {
           >
             <MessageSquare size={24} />
           </button>
-
           <button
             onClick={handleMicToggle}
             className={`p-5 rounded-full text-white shadow-white-50/50 shadow-xs transition-all duration-300 transform ${
@@ -657,11 +750,10 @@ const DebatePage = () => {
                 : "bg-black-100/40 hover:bg-gray-700"
             }`}
             title={getMicButtonTitle()}
-            disabled={!isUserTurn} // It's good practice to disable the mic when it's not the user's turn
+            disabled={!isUserTurn}
           >
             <Mic size={32} />
           </button>
-
           <button
             onClick={handleGetFeedback}
             disabled={isFeedbackLoading}
@@ -670,7 +762,6 @@ const DebatePage = () => {
           >
             <Gavel size={24} />
           </button>
-
           <button
             onClick={handleLeaveDebate}
             className="p-3 rounded-full bg-red-600 hover:bg-red-500 text-white"
@@ -680,7 +771,6 @@ const DebatePage = () => {
           </button>
         </div>
       </div>
-
       {isFeedbackLoading && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <p className="text-2xl text-white animate-pulse">
@@ -688,7 +778,6 @@ const DebatePage = () => {
           </p>
         </div>
       )}
-
       {feedbackData && (
         <FeedbackModal
           feedbackData={feedbackData}
@@ -696,14 +785,12 @@ const DebatePage = () => {
           onClose={() => setFeedbackData(null)}
         />
       )}
-
       {isLeaveModalVisible && (
         <LeaveConfirmationModal
           onConfirm={executeLeave}
           onCancel={() => setIsLeaveModalVisible(false)}
         />
       )}
-
       <div
         className={`fixed top-0 right-0 h-full w-full max-w-md bg-black-100/20 backdrop-blur-lg border-l border-black-50 p-6 transform transition-transform duration-500 ease-in-out z-40 ${
           isChatVisible ? "translate-x-0" : "translate-x-full"

@@ -6,6 +6,76 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from 'url';
 import cors from 'cors';
+import fs from "fs"; // <-- RAG INTEGRATION
+
+// --- RAG INTEGRATION START ---
+// LangChain Document Loading & Splitting
+import { DirectoryLoader } from "langchain/document_loaders/fs/directory";
+import { TextLoader } from "langchain/document_loaders/fs/text";
+import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
+import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
+
+// LangChain Embeddings & Vector Store (all local)
+import { HuggingFaceTransformersEmbeddings } from "@langchain/community/embeddings/hf_transformers";
+import { FaissStore } from "@langchain/community/vectorstores/faiss";
+
+// RAG Configuration
+const DOCUMENTS_FOLDER = "reference_papers";
+const VECTOR_STORE_PATH = "faiss_index";
+const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2"; // Free, local model for embeddings
+
+// Global variable to hold the vector store
+let vectorStore = null;
+
+/**
+ * Creates or loads a FAISS vector store from documents in the DOCUMENTS_FOLDER.
+ * This is run once when the server starts.
+ * @returns {Promise<FaissStore>} The initialized vector store.
+ */
+async function getVectorStore() {
+  console.log("Initializing RAG document store...");
+  const embeddings = new HuggingFaceTransformersEmbeddings({ modelName: EMBEDDING_MODEL });
+
+  if (fs.existsSync(VECTOR_STORE_PATH)) {
+    console.log("✅ Loading existing vector store from disk...");
+    return await FaissStore.load(VECTOR_STORE_PATH, embeddings);
+  }
+
+  console.log("⏳ No existing vector store found. Creating a new one...");
+
+  // Ensure document directory exists
+  if (!fs.existsSync(DOCUMENTS_FOLDER)) {
+    fs.mkdirSync(DOCUMENTS_FOLDER);
+    fs.writeFileSync(path.join(DOCUMENTS_FOLDER, "placeholder.txt"), "Add your PDF and TXT files here to provide context to the debate agents.");
+    console.log(`Created '${DOCUMENTS_FOLDER}' with a placeholder file.`);
+  }
+
+  console.log("- Loading documents...");
+  const loader = new DirectoryLoader(DOCUMENTS_FOLDER, {
+    ".pdf": (path) => new PDFLoader(path, { splitPages: false }),
+    ".txt": (path) => new TextLoader(path),
+  });
+  const docs = await loader.load();
+
+  if (docs.length === 0) {
+     console.warn("⚠️ No documents found in the `reference_papers` folder. The agents will not have any external context.");
+     return null; // Return null if no docs to process
+  }
+  console.log(`- Loaded ${docs.length} document(s).`);
+
+  console.log("- Splitting documents into chunks...");
+  const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 200 });
+  const chunks = await splitter.splitDocuments(docs);
+  console.log(`- Created ${chunks.length} document chunks.`);
+
+  console.log("- Generating embeddings and creating FAISS vector store (this may take a moment)...");
+  const store = await FaissStore.fromDocuments(chunks, embeddings);
+  await store.save(VECTOR_STORE_PATH);
+  console.log(`✅ Vector store created and saved to '${VECTOR_STORE_PATH}'.`);
+
+  return store;
+}
+// --- RAG INTEGRATION END ---
 
 dotenv.config();
 
@@ -215,7 +285,10 @@ class SerpApiSearch {
 
 // Unified Agent Class
 class VoiceAgent {
-  constructor(name, role, prompt, voiceModel, conversationContext, serpApiSearch = null) {
+  // --- RAG INTEGRATION START ---
+  // Modified constructor to accept the vector store
+  constructor(name, role, prompt, voiceModel, conversationContext, vectorStore, serpApiSearch = null) {
+  // --- RAG INTEGRATION END ---
     this.name = name;
     this.role = role;
     this.prompt = prompt;
@@ -226,6 +299,9 @@ class VoiceAgent {
     this.deepgramClient = createClient(process.env.DEEPGRAM_API_KEY);
     this.serpApiSearch = serpApiSearch;
     this.interruptedStatement = null;
+    // --- RAG INTEGRATION START ---
+    this.vectorStore = vectorStore; // Store the vector store instance
+    // --- RAG INTEGRATION END ---
   }
 
   // This MUST be a static property to be shared across all instances
@@ -268,64 +344,75 @@ class VoiceAgent {
     return "I must yield the floor. My apologies.";
   }
 
-
+  // --- RAG INTEGRATION START ---
+  // The generateResponse method is completely replaced with the RAG-aware version.
   async generateResponse(userInput, isUserInterruption = false, debatePrompt = null, userLevel = 'beginner') {
     const mainInput = debatePrompt && !userInput ? debatePrompt : userInput;
     const conversationHistory = this.conversationContext.getHistory();
     let systemPrompt = `${this.prompt}\n${MASTER_PROMPT_INSTRUCTIONS}`;
 
     try {
-      let finalResponse; // Declare finalResponse here to be accessible throughout the try block
+      let retrievedContext = "No specific documents were found to be relevant for this point.";
+      let finalResponse;
 
-      // --- Step 1: Define the Agent's Immediate Task (Role-Aware Context) ---
-      let taskPrompt = "";
-      if (!mainInput) {
-        // This is the first speaker
-        taskPrompt = `You are the first speaker. Please open the debate with your initial statement.`;
-        finalResponse = await this.getSanitizedLLMResponse(taskPrompt, systemPrompt);
+      // Step 1: Retrieve relevant documents from the vector store if it exists
+      if (this.vectorStore && mainInput) {
+        console.log(`[RAG] Agent ${this.name} is retrieving documents based on: "${mainInput.substring(0, 100)}..."`);
+        const retriever = this.vectorStore.asRetriever(6);
+        const relevantDocs = await retriever.getRelevantDocuments(mainInput);
 
-      } else if (userLevel === 'expert' && this.serpApiSearch) {
-        // --- Expert Logic Path ---
-        console.log(`[EXPERT MODE] Agent ${this.name} is thinking...`);
-
-        const searchQueryGenPrompt = `Your role is ${this.role}. The last speaker said: "${mainInput}". Based on your role, what is the most effective fact or claim to verify with a web search to build your argument? Respond with a concise Google search query, or "NONE".\n${MASTER_PROMPT_INSTRUCTIONS}`;
-        const searchQuery = await this.getSanitizedLLMResponse(searchQueryGenPrompt, systemPrompt);
-
-        let searchResultsText = "No web search was performed.";
-        if (searchQuery && searchQuery.toUpperCase() !== 'NONE') {
-          console.log(`[EXPERT MODE] ${this.name} searching for: "${searchQuery}"`);
-          const searchData = await this.serpApiSearch.search(searchQuery);
-          if (searchData && searchData.organic_results) {
-            searchResultsText = "Recent web search results:\n" + searchData.organic_results.slice(0, 3).map(r => r.snippet).join('\n');
-          }
+        if (relevantDocs.length > 0) {
+          retrievedContext = relevantDocs.map((doc, i) => `Source ${i+1}: ${doc.pageContent}`).join("\n\n");
+          console.log(`[RAG] Found ${relevantDocs.length} relevant document chunks using MMR.`);
+        } else {
+          console.log(`[RAG] No relevant documents found for the input.`);
         }
-
-        taskPrompt = `The previous speaker said: "${mainInput}".
-        Here are the results of a web search you just performed:
-        ---
-        ${searchResultsText}
-        ---
-        Based on your specific role as ${this.role}, and the search results, formulate your response.`;
-        finalResponse = await this.getSanitizedLLMResponse(taskPrompt, systemPrompt);
-
-      } else {
-        // --- BEGINNER/INTERMEDIATE LOGIC PATH ---
-        // We need to use a different system prompt here that includes the conversation history
-        const beginnerSystemPrompt = `${this.prompt}\n\nPrevious conversation:\n${conversationHistory}\n${MASTER_PROMPT_INSTRUCTIONS}`;
-        taskPrompt = `The previous speaker said: "${mainInput}". Based on your specific role as ${this.role}, formulate your response.`;
-        finalResponse = await this.getSanitizedLLMResponse(taskPrompt, beginnerSystemPrompt);
+      } else if (!this.vectorStore) {
+        console.log("[RAG] Vector store not available. Skipping document retrieval.");
       }
 
-      // The finalResponse is now guaranteed to be clean and valid by getSanitizedLLMResponse.
+      // Step 2: Construct the task prompt, now including the retrieved context
+      let taskPrompt = "";
+      if (!mainInput) {
+        // This is the first speaker, no context needed
+        taskPrompt = `You are the first speaker. Please open the debate with your initial statement.`;
+      } else {
+        // All subsequent speakers get the RAG context
+        taskPrompt = `
+        **Previous Conversation:**
+        ${conversationHistory}
+
+        **The previous speaker said:** "${mainInput}"
+
+        **Retrieved Context from Reference Documents:**
+        ---
+        ${retrievedContext}
+        ---
+
+        **YOUR CRITICAL TASK:**
+        You are ${this.name}, the ${this.role}.
+        1. **Analyze the retrieved context:** Identify facts, statistics, or arguments from the documents that support your position or refute the opponent.
+        2. **Synthesize, Don't Copy:** You MUST integrate the information from the context naturally into your own speech. DO NOT simply copy and paste sentences from the context.
+        3. **Formulate Your Response:** Based on your role, the conversation history, and ESPECIALLY the retrieved context, formulate your next statement in the debate.
+        4. **Cite Your Source (If Applicable):** If you use a specific fact, you can mention it comes from the provided materials, e.g., "According to the provided policy brief..." or "The statistics in our documents show...".
+        5. **Stay in Character:** Deliver this evidence-based response in your assigned role.
+
+        Formulate your concise and powerful response now.
+        `;
+      }
+      
+      // Step 3: Generate the response using the augmented prompt
+      finalResponse = await this.getSanitizedLLMResponse(taskPrompt, systemPrompt);
+
       this.interruptedStatement = finalResponse;
-      // The message is added in the PipelineManager, so we just return the text.
       return finalResponse;
 
     } catch (error) {
-      console.error(`Error generating response for ${this.name}:`, error);
+      console.error(`Error generating RAG-based response for ${this.name}:`, error);
       return "I'm sorry, I seem to have lost my train of thought.";
     }
   }
+  // --- RAG INTEGRATION END ---
 
   async generatePoiResponse(poiTranscript) {
     if (!this.interruptedStatement) {
@@ -1408,6 +1495,7 @@ class VoiceAssistantApp {
                 `You are a skilled and impartial parliamentary debate moderator. Your role is to guide the discussion, maintain order, and ensure a balanced debate.\n- The motion for today's debate is: "${debateTopic}"\n- You must remain completely neutral, showing no preference for either side.\n- Your tasks include introducing the topic, calling on speakers in the correct order, asking clarifying questions to both sides, and summarizing key arguments.\n- You speak with authority, clarity, and fairness.\n- ${noStageDirectionsPrompt}`,
                 shuffledVoices.pop() || 'aura-2-thalia-en',
                 conversationContext,
+                vectorStore, // <-- RAG INTEGRATION
                 this.serpApiSearch
               ),
               new VoiceAgent(
@@ -1416,6 +1504,7 @@ class VoiceAssistantApp {
                 `You are the Prime Minister and the leader of the Government. You are a powerful, confident, and persuasive speaker.\n- The motion for today's debate is: "${debateTopic}"\n- Your government's position is to STRONGLY SUPPORT this motion. ${agentDifficultyPrompt}\n- You must build a compelling case in favor of the motion, using evidence, logical reasoning, and rhetorical skill. You set the tone for your entire side of the debate. \n- ${noStageDirectionsPrompt}`,
                 shuffledVoices.pop() || 'aura-2-apollo-en',
                 conversationContext,
+                vectorStore, // <-- RAG INTEGRATION
                 this.serpApiSearch
               ),
               new VoiceAgent(
@@ -1424,6 +1513,7 @@ class VoiceAssistantApp {
                 `You are the Leader of the Opposition. You are a sharp, critical, and passionate speaker, skilled at finding flaws in arguments.\n- The motion for today's debate is: "${debateTopic}"\n- Your party's position is to STRONGLY OPPOSE this motion. ${agentDifficultyPrompt}\n- You must dismantle the government's case and build a compelling counter-argument against the motion. Your goal is to convince everyone that the motion is misguided.\n- ${noStageDirectionsPrompt}`,
                 shuffledVoices.pop() || 'aura-2-arcas-en',
                 conversationContext,
+                vectorStore, // <-- RAG INTEGRATION
                 this.serpApiSearch
               ),
               new VoiceAgent(
@@ -1432,6 +1522,7 @@ class VoiceAssistantApp {
                 `You are the Deputy Prime Minister. You are a loyal and articulate supporter of the government's position.\n- The motion for today's debate is: "${debateTopic}"\n- Your role is to reinforce the Prime Minister's arguments, introduce new points that SUPPORT the motion, and rebut the Opposition's claims. ${agentDifficultyPrompt}\n- You speak with conviction and unwavering support for your side.\n- ${noStageDirectionsPrompt}`,
                 shuffledVoices.pop() || 'aura-2-asteria-en',
                 conversationContext,
+                vectorStore, // <-- RAG INTEGRATION
                 this.serpApiSearch
               ),
               new VoiceAgent(
@@ -1440,6 +1531,7 @@ class VoiceAssistantApp {
                 `You are the Deputy Leader of the Opposition. You are a determined and detail-oriented debater.\n- The motion for today's debate is: "${debateTopic}"\n- Your role is to support your leader by attacking the government's case, providing new arguments AGAINST the motion, and exposing weaknesses in their logic. ${agentDifficultyPrompt}\n- You speak with concern and firm opposition.\n- ${noStageDirectionsPrompt}`,
                 shuffledVoices.pop() || 'aura-2-atlas-en',
                 conversationContext,
+                vectorStore, // <-- RAG INTEGRATION
                 this.serpApiSearch
               ),
               // ---------- CORRECTED AGENT DEFINITIONS START ----------
@@ -1449,6 +1541,7 @@ class VoiceAssistantApp {
                 `You are the Member for the Government. You are a persuasive and strategic debater.\n- The motion for today's debate is: "${debateTopic}"\n- Your role is to introduce new arguments in support of the motion, reinforce your team's case, and rebut the opposition. ${agentDifficultyPrompt}\n- You speak with clarity and conviction.\n- ${noStageDirectionsPrompt}`,
                 shuffledVoices.pop() || 'aura-2-cora-en',
                 conversationContext,
+                vectorStore, // <-- RAG INTEGRATION
                 this.serpApiSearch
               ),
               new VoiceAgent(
@@ -1457,6 +1550,7 @@ class VoiceAssistantApp {
                 `You are the Member for the Opposition. You are a sharp and resourceful debater.\n- The motion for today's debate is: "${debateTopic}"\n- Your role is to introduce new arguments against the motion, reinforce your team's case, and rebut the government. ${agentDifficultyPrompt}\n- You speak with clarity and conviction.\n- ${noStageDirectionsPrompt}`,
                 shuffledVoices.pop() || 'aura-2-cordelia-en',
                 conversationContext,
+                vectorStore, // <-- RAG INTEGRATION
                 this.serpApiSearch
               ),
               // ---------- CORRECTED AGENT DEFINITIONS END ----------
@@ -1466,6 +1560,7 @@ class VoiceAssistantApp {
                 `You are the Government Whip. Your focus is on summarizing and reinforcing your side's arguments with clarity and discipline.\n- The motion for today's debate is: "${debateTopic}"\n- Your task is to summarize the key points made by your Prime Minister, Deputy, and Member, crystallize your government's position, and show why your side has won the debate. You must strongly SUPPORT the motion. ${agentDifficultyPrompt}\n- You speak with party loyalty and a focus on practical, powerful summaries.\n- ${noStageDirectionsPrompt}`,
                 shuffledVoices.pop() || 'aura-2-callista-en',
                 conversationContext,
+                vectorStore, // <-- RAG INTEGRATION
                 this.serpApiSearch
               ),
               new VoiceAgent(
@@ -1474,6 +1569,7 @@ class VoiceAssistantApp {
                 `You are the Opposition Whip. Your focus is on summarizing and reinforcing your side's arguments to deliver a final, decisive blow.\n- The motion for today's debate is: "${debateTopic}"\n- Your task is to summarize the key arguments from your Leader, Deputy, and Member, highlight the failures of the government's case, and make a final, passionate plea for why the motion must be rejected. ${agentDifficultyPrompt}\n- You speak with party loyalty and protective concern for the principles you are defending.\n- ${noStageDirectionsPrompt}`,
                 shuffledVoices.pop() || 'aura-2-delia-en',
                 conversationContext,
+                vectorStore, // <-- RAG INTEGRATION
                 this.serpApiSearch
               ),
             ];
@@ -1551,4 +1647,17 @@ class VoiceAssistantApp {
 
 // Initialize and start the application
 const app = new VoiceAssistantApp();
-app.start(3002);
+
+// --- RAG INTEGRATION START ---
+// Initialize the vector store when the application starts
+(async () => {
+    try {
+        vectorStore = await getVectorStore();
+        app.start(3002);
+    } catch (error) {
+        console.error("❌ Failed to initialize the RAG vector store. The application will not start.");
+        console.error(error);
+        process.exit(1);
+    }
+})();
+// --- RAG INTEGRATION END ---
