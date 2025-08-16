@@ -14,6 +14,62 @@ const AppShowcase = () => {
   const showRef = useRef(null);
   const libraryRef = useRef(null);
   const ycDirectoryRef = useRef(null);
+  const fluidCanvasRef = useRef(null);
+
+  // Function to simulate mouse interaction on FluidCanvas
+  const simulateFluidInteraction = () => {
+    const canvas = fluidCanvasRef.current?.querySelector('canvas');
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+
+    // Create multiple interaction points for a more dynamic effect
+    const interactions = [
+      { x: centerX, y: centerY * 0.7, delay: 0 },
+      { x: centerX * 1.3, y: centerY * 1.2, delay: 0.5 },
+      { x: centerX * 0.7, y: centerY * 1.3, delay: 1 },
+      { x: centerX * 1.2, y: centerY * 0.8, delay: 1.5 }
+    ];
+
+    interactions.forEach(({ x, y, delay }) => {
+      setTimeout(() => {
+        // Simulate mouse events
+        const mouseEnterEvent = new MouseEvent('mouseenter', {
+          clientX: rect.left + x,
+          clientY: rect.top + y,
+          bubbles: true
+        });
+        
+        const mouseMoveEvent = new MouseEvent('mousemove', {
+          clientX: rect.left + x,
+          clientY: rect.top + y,
+          bubbles: true
+        });
+
+        canvas.dispatchEvent(mouseEnterEvent);
+        canvas.dispatchEvent(mouseMoveEvent);
+
+        // Add a slight movement animation
+        gsap.to({}, {
+          duration: 0.3,
+          onUpdate: function() {
+            const progress = this.progress();
+            const offsetX = Math.sin(progress * Math.PI * 2) * 30;
+            const offsetY = Math.cos(progress * Math.PI * 2) * 20;
+            
+            const moveEvent = new MouseEvent('mousemove', {
+              clientX: rect.left + x + offsetX,
+              clientY: rect.top + y + offsetY,
+              bubbles: true
+            });
+            canvas.dispatchEvent(moveEvent);
+          }
+        });
+      }, delay * 1000);
+    });
+  };
 
   useGSAP(() => {
     // Animation for the main section
@@ -22,6 +78,25 @@ const AppShowcase = () => {
       { opacity: 0 },
       { opacity: 1, duration: 1.5 }
     );
+
+    // ScrollTrigger for automatic fluid interaction
+    ScrollTrigger.create({
+      trigger: sectionRef.current,
+      start: "top center",
+      end: "bottom center",
+      onEnter: () => {
+        // Delay the interaction slightly after the section comes into view
+        setTimeout(() => {
+          simulateFluidInteraction();
+        }, 300);
+      },
+      onEnterBack: () => {
+        // Also trigger when scrolling back up into the section
+        setTimeout(() => {
+          simulateFluidInteraction();
+        }, 800);
+      }
+    });
 
     // Animations for each app showcase
     const cards = [showRef.current, libraryRef.current, ycDirectoryRef.current];
@@ -49,7 +124,9 @@ const AppShowcase = () => {
 
   return (
     <div id="work" ref={sectionRef} className="app-showcase">
-      <FluidCanvas />
+      <div ref={fluidCanvasRef}>
+        <FluidCanvas />
+      </div>
       <div className="w-full">
         <div className="showcaselayout">
           <div ref={showRef} className="first-project-wrapper">

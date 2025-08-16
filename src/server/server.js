@@ -1,3 +1,5 @@
+// server 1
+
 import express from "express";
 import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
@@ -24,8 +26,8 @@ import { HuggingFaceTransformersEmbeddings } from "@langchain/community/embeddin
 import { FaissStore } from "@langchain/community/vectorstores/faiss";
 
 // RAG Configuration
-const BASE_DOCUMENTS_FOLDER = "reference_papers";
-const BASE_VECTOR_STORE_PATH = "faiss_index";
+const BASE_DOCUMENTS_FOLDER = "src/server/reference_papers";
+const BASE_VECTOR_STORE_PATH = "src/server/faiss_index";
 const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 
 /**
@@ -111,7 +113,6 @@ const Debate = mongoose.model('Debate', debateSchema);
 
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const MASTER_PROMPT_INSTRUCTIONS = `
 CRITICAL INSTRUCTIONS:
@@ -681,7 +682,7 @@ class TurnManager {
       3, // Deputy Prime Minister (Government)
       4, // Deputy Leader of Opposition (Opposition)
       5, // Government Whip (Government)
-      6  // Opposition Whip (Opposition)
+      6, // Opposition Whip (Opposition)
     ];
 
     const currentIndex = turnOrder.indexOf(this.currentTurnIndex);
@@ -1291,7 +1292,7 @@ class UnifiedConnectionManager {
         if (this.conversationContext.messages.length > 1) {
             console.log(`[DB Save for ${this.clientId}] Preparing to save debate record.`);
 
-            const sessionDocsPath = path.join(__dirname, BASE_DOCUMENTS_FOLDER, this.clientId);
+            const sessionDocsPath = path.join(BASE_DOCUMENTS_FOLDER, this.clientId);
             const uploadedFiles = [];
 
             if (fs.existsSync(sessionDocsPath)) {
@@ -1324,8 +1325,8 @@ class UnifiedConnectionManager {
     } finally {
         // --- LOCAL FILE CLEANUP (runs regardless of DB save success) ---
         try {
-            const sessionDocsPath = path.join(__dirname, BASE_DOCUMENTS_FOLDER, this.clientId);
-            const sessionIndexPath = path.join(__dirname, BASE_VECTOR_STORE_PATH, this.clientId);
+            const sessionDocsPath = path.join(BASE_DOCUMENTS_FOLDER, this.clientId);
+            const sessionIndexPath = path.join(BASE_VECTOR_STORE_PATH, this.clientId);
             
             console.log(`[Cleanup for ${this.clientId}] Deleting session document folder: ${sessionDocsPath}`);
             if (fs.existsSync(sessionDocsPath)) {
@@ -1472,7 +1473,7 @@ class VoiceAssistantApp {
             if (!clientId) {
                 return cb(new Error('Client ID is required for upload'), null);
             }
-            const dir = path.join(__dirname, BASE_DOCUMENTS_FOLDER, clientId);
+            const dir = path.join(BASE_DOCUMENTS_FOLDER, clientId);
             fs.mkdirSync(dir, { recursive: true });
             cb(null, dir);
         },
@@ -1495,6 +1496,7 @@ class VoiceAssistantApp {
         }
     });
 
+
     // --- NEW: File upload endpoint ---
     this.app.post('/api/upload-papers', upload.array('papers', 10), (req, res) => {
         res.status(200).json({ message: 'Files uploaded successfully!', files: req.files.map(f => f.originalname) });
@@ -1514,7 +1516,7 @@ class VoiceAssistantApp {
     });
 
     this.app.get("/", (req, res) => {
-      res.sendFile(__dirname + "/public/index.html");
+      res.sendFile("/public/index.html");
     });
 
     this.app.post("/api/clear-context/:clientId", (req, res) => {
@@ -1716,6 +1718,9 @@ class VoiceAssistantApp {
     });
   }
 
+
+
+
   start(port = 3001) {
     this.server.listen(port, () => {
       console.log(`Server is listening on port ${port}`);
@@ -1739,4 +1744,12 @@ class VoiceAssistantApp {
 
 // Initialize and start the application
 const app = new VoiceAssistantApp();
+
+
+/**
+ * @route   GET /api/debates
+ * @desc    Get all debate sessions (lightweight version for list view)
+ * @access  Public
+ */
+
 app.start(3001);
