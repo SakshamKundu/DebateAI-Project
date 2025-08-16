@@ -69,6 +69,9 @@ node ./src/server/server.js
 
 # British Parliamentary
 node ./src/server/server2.js
+
+# RAG and Chatbot
+node ./src/server/server3.js
 ```
 
 ---
