@@ -13,6 +13,7 @@
 - **Chatbot For analysing past debates**: Memory based Debate chatbot that can suggest improvements in performance and analyse past debates.
 - **Debate History Storage**: Get a complete overview of the past debates including the debate transcripts , results and documents uploaded.
 - **RAG based debates**: Upload documents as references for the AI-agents to debate on a particular topic.
+- **Debate clock**: Stopwatch tracking user speech time with color-coded warnings to practice staying within time limits.
 
 ---
 

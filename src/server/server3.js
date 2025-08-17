@@ -35,9 +35,9 @@ const connectDB = async () => {
 
 connectDB();
 
-// Debate Schema - No changes needed here.
+// Debate Schema
 const debateSchema = new mongoose.Schema({
-  clientId: { type: String, required: true, index: true }, // Added index for faster queries on clientId
+  clientId: { type: String, required: true, index: true },
   debateTopic: { type: String, required: true },
   userRole: { type: String, required: true },
   chatHistory: [{
@@ -58,12 +58,9 @@ const Debate = mongoose.model('Debate', debateSchema);
 
 // --- Routes ---
 
-// MODIFICATION: Get all debates from all clients (basic info)
-// This new route fetches a summary of all debates.
+// Get all debates from all clients (basic info)
 app.get('/api/debates', async (req, res) => {
   try {
-    // Fetches from all documents, but only returns the necessary fields for the list view.
-    // We now include 'clientId' so the frontend can display it.
     const debates = await Debate.find(
       {},
       'debateTopic userRole createdAt clientId'
@@ -80,8 +77,7 @@ app.get('/api/debates', async (req, res) => {
   }
 });
 
-// MODIFICATION: Get complete details of a specific debate by its ID
-// This route is now simpler and doesn't require the clientId.
+// Get complete details of a specific debate by its ID
 app.get('/api/debates/:debateId', async (req, res) => {
   try {
     const { debateId } = req.params;
@@ -90,7 +86,6 @@ app.get('/api/debates/:debateId', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid debate ID format.' });
     }
 
-    // Find by the unique debate ID (_id)
     const debate = await Debate.findById(debateId);
 
     if (!debate) {
@@ -129,25 +124,20 @@ app.post('/api/debates', async (req, res) => {
   }
 });
 
-const formatDebatesForLLM = (debates) => {
-  if (!debates || debates.length === 0) {
-    return "No debate history found.";
-  }
+const formatDebateForLLM = (debate) => {
+  const limitedChatHistory = debate.chatHistory.slice(-10);
+  const chatHistoryText = limitedChatHistory
+    .map(chat => `${chat.speaker}: ${chat.content}`)
+    .join('\n');
 
-  return debates.map(debate => {
-    const chatHistoryText = debate.chatHistory
-      .map(chat => `${chat.speaker}: ${chat.content}`)
-      .join('\n');
+  const adjudicationText = debate.adjudicationResult && Object.keys(debate.adjudicationResult).length > 0
+    ? `Adjudication Result:\n${JSON.stringify(debate.adjudicationResult, null, 2)}`
+    : 'No adjudication result available.';
 
-    const adjudicationText = debate.adjudicationResult && Object.keys(debate.adjudicationResult).length > 0
-      ? `Adjudication Result:\n${JSON.stringify(debate.adjudicationResult, null, 2)}`
-      : 'No adjudication result available.';
-
-    return `
---- DEBATE START ---
+  return `
+  --- DEBATE START ---
 Debate Topic: ${debate.debateTopic}
 Your Role: ${debate.userRole}
-Client ID: ${debate.clientId}
 Date: ${new Date(debate.createdAt).toDateString()}
 
 Chat History:
@@ -155,40 +145,81 @@ ${chatHistoryText}
 
 ${adjudicationText}
 --- DEBATE END ---
-    `.trim();
-  }).join('\n\n');
+  `.trim();
 };
 
+const formatDebatesForLLM = (debates, questionHistory, currentQuestion) => {
+  // Format question history
+  const questionHistoryText = questionHistory && questionHistory.length > 0
+    ? `Recent Questions (most recent last):\n${questionHistory
+        .map((q, i) => `${i + 1}. ${q}`)
+        .join('\n')}`
+    : 'No previous questions available.';
 
-// New RAG Chat Endpoint - Now can query across all clients if needed.
+  // Check if the current question is a follow-up referring to the most recent debate
+  let context = '';
+  if (currentQuestion.toLowerCase().includes('that particular debate') && questionHistory.length > 0) {
+    const lastQuestion = questionHistory[questionHistory.length - 1].toLowerCase();
+    if (lastQuestion.includes('last debate') || lastQuestion.includes('most recent debate')) {
+      // Assume the first debate is the most recent (sorted by createdAt)
+      if (debates.length > 0) {
+        context = `**Relevant Debate (from most recent question)**:\n${formatDebateForLLM(debates[0])}`;
+      } else {
+        context = 'No debate history found for the most recent question.';
+      }
+    } else {
+      // Try to match the last question to a debate topic
+      const matchedDebate = debates.find(debate => 
+        lastQuestion.includes(debate.debateTopic.toLowerCase())
+      );
+      if (matchedDebate) {
+        context = `**Relevant Debate (from most recent question)**:\n${formatDebateForLLM(matchedDebate)}`;
+      } else {
+        context = 'Could not identify the specific debate referred to in the most recent question.';
+      }
+    }
+  } else {
+    // Include all debates for non-follow-up questions
+    if (!debates || debates.length === 0) {
+      context = 'No debate history found.';
+    } else {
+      context = debates.map(debate => `--- DEBATE START ---\n${formatDebateForLLM(debate)}\n--- DEBATE END ---`).join('\n\n');
+    }
+  }
+
+  return `${questionHistoryText}\n\n${context}`;
+};
+
+// RAG Chat Endpoint
 app.post('/api/chat/rag', async (req, res) => {
-  const { question, clientId } = req.body; // Can optionally filter by clientId here
+  const { question, clientId, questionHistory = [] } = req.body;
 
   if (!question) {
     return res.status(400).json({ success: false, message: 'Question is required.' });
   }
 
   try {
-    // RETRIEVAL: Fetch debates. If a clientId is provided, filter by it. Otherwise, fetch all.
     const query = clientId ? { clientId } : {};
-    const debates = await Debate.find(query).sort({ createdAt: -1 });
+    const debates = await Debate.find(query).sort({ createdAt: -1 }).limit(7);
 
-    if (debates.length === 0) {
+    if (debates.length === 0 && questionHistory.length === 0) {
       return res.json({
         success: true,
-        reply: "I couldn't find any debate history. Once you complete a debate, you can ask me questions about it."
+        reply: "I couldn't find any debate history or previous questions. Once you complete a debate or ask more questions, I can provide more context."
       });
     }
 
-    // AUGMENTATION & GENERATION
-    const context = formatDebatesForLLM(debates);
+    const context = formatDebatesForLLM(debates, questionHistory, question);
     const model = new ChatGroq({
       apiKey: process.env.GROQ_API_KEY,
-      model: "llama3-8b-8192", // Using a recommended fast model
+      model: "llama3-8b-8192",
     });
 
     const prompt = ChatPromptTemplate.fromMessages([
-      ["system", "You are an expert assistant who analyzes a user's debate history. Answer the user's question based ONLY on the context provided below. If the information is not in the context, explicitly state that you cannot answer based on their history. Be concise and helpful.\n\nCONTEXT:\n{context}"],
+      ["system", `You are an expert assistant who analyzes a user's debate history and recent questions. Answer the user's question based ONLY on the context provided below. If the question contains phrases like "that particular debate" or refers to a specific debate from the most recent question, focus EXCLUSIVELY on that debate and provide a precise answer (e.g., only the role for that debate). For other questions, use the full context of recent questions and debate history. If the information is not in the context, explicitly state that you cannot answer based on the provided history. Be concise, accurate, and avoid listing unnecessary details.
+
+CONTEXT:
+{context}`],
       ["human", "{question}"],
     ]);
 
@@ -204,7 +235,8 @@ app.post('/api/chat/rag', async (req, res) => {
     console.error('RAG chat error:', error);
     res.status(500).json({
       success: false,
-      message: 'An error occurred while processing your request.'
+      message: 'An error occurred while processing your request.',
+      error: error.message
     });
   }
 });

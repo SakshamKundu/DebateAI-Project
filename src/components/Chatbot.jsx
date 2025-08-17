@@ -1,17 +1,19 @@
 import React, { useState, useEffect, useRef } from "react";
-import { MessageCircle, X, Send, Minimize2 } from "lucide-react";
+import { MessageCircle, X, Send, Minimize2, Maximize2 } from "lucide-react";
 
 const Chatbot = () => {
-  const [isOpen, setIsOpen] = useState(false);
-  const [isMinimized, setIsMinimized] = useState(false);
-  const [messages, setMessages] = useState([
+  const initialMessages = [
     {
       sender: "bot",
       text: "Hello! I have access to the entire debate history. Ask me anything, like 'How many debates are there in total?' or 'Summarize the debate about social media.'",
     },
-  ]);
+  ];
+  const [isOpen, setIsOpen] = useState(false);
+  const [isMinimized, setIsMinimized] = useState(false);
+  const [messages, setMessages] = useState(initialMessages);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [questionHistory, setQuestionHistory] = useState([]); // Store last 7 questions
   const messagesEndRef = useRef(null);
   const API_URL = "http://localhost:5000/api";
 
@@ -26,6 +28,13 @@ const Chatbot = () => {
     const userMessage = { sender: "user", text: inputValue };
     setMessages((prev) => [...prev, userMessage]);
     const question = inputValue;
+
+    // Update question history (keep last 7)
+    setQuestionHistory((prev) => {
+      const newHistory = [...prev, question].slice(-7);
+      return newHistory;
+    });
+
     setInputValue("");
     setIsLoading(true);
 
@@ -37,11 +46,15 @@ const Chatbot = () => {
         },
         body: JSON.stringify({
           question: question,
+          questionHistory: questionHistory, // Send question history
         }),
       });
 
       const data = await response.json();
-      const botMessage = { sender: "bot", text: data.reply };
+      const botMessage = {
+        sender: "bot",
+        text: data.success && data.reply ? data.reply : "Sorry, I couldn't process your request.",
+      };
       setMessages((prev) => [...prev, botMessage]);
     } catch (error) {
       console.error("Error fetching RAG response:", error);
@@ -56,12 +69,16 @@ const Chatbot = () => {
   };
 
   const toggleChat = () => {
+    if (isOpen) {
+      // Reset messages and question history when closing
+      setMessages(initialMessages);
+      setQuestionHistory([]);
+    }
     setIsOpen(!isOpen);
-    if (isMinimized) setIsMinimized(false);
   };
 
   const minimizeChat = () => {
-    setIsMinimized(true);
+    setIsMinimized((prev) => !prev);
   };
 
   return (
@@ -94,7 +111,7 @@ const Chatbot = () => {
         <div className="fixed bottom-6 right-6 z-50">
           <div
             className={`bg-black-100/20 backdrop-blur-lg border border-gray-800 rounded-2xl shadow-2xl transition-all duration-300 ${
-              isMinimized ? "w-80 h-16" : "w-96 h-[500px]"
+              isMinimized ? "w-80 h-16 bg-gray-900/90": "w-96 h-[500px]"
             }`}
           >
             {/* Header */}
@@ -119,7 +136,11 @@ const Chatbot = () => {
                   onClick={minimizeChat}
                   className="p-2 hover:bg-gray-800 rounded-lg transition-colors"
                 >
-                  <Minimize2 className="w-4 h-4 text-gray-400 hover:text-white" />
+                  {isMinimized ? (
+                    <Maximize2 className="w-4 h-4 text-gray-400 hover:text-white" />
+                  ) : (
+                    <Minimize2 className="w-4 h-4 text-gray-400 hover:text-white" />
+                  )}
                 </button>
                 <button
                   onClick={toggleChat}
@@ -148,11 +169,17 @@ const Chatbot = () => {
                             : "bg-gray-800/80 text-white border border-gray-700"
                         } shadow-lg`}
                       >
-                        {msg.text.split("\n").map((line, i) => (
-                          <p key={i} className="text-sm leading-relaxed">
-                            {line}
+                        {typeof msg.text === "string" && msg.text ? (
+                          msg.text.split("\n").map((line, i) => (
+                            <p key={i} className="text-sm leading-relaxed">
+                              {line}
+                            </p>
+                          ))
+                        ) : (
+                          <p className="text-sm leading-relaxed">
+                            [Invalid message content]
                           </p>
-                        ))}
+                        )}
                       </div>
                     </div>
                   ))}
@@ -214,51 +241,53 @@ const Chatbot = () => {
         </div>
       )}
 
-      <style jsx>{`
-        @keyframes float {
-          0%,
-          100% {
-            transform: translateY(0px);
+      <style>
+        {`
+          @keyframes float {
+            0%,
+            100% {
+              transform: translateY(0px);
+            }
+            50% {
+              transform: translateY(-4px);
+            }
           }
-          50% {
-            transform: translateY(-4px);
+          /* Custom Scrollbar for Webkit browsers (Chrome, Safari, Edge) */
+          .overflow-y-auto::-webkit-scrollbar {
+            width: 8px;
           }
-        }
-        /* Custom Scrollbar for Webkit browsers (Chrome, Safari, Edge) */
-        .overflow-y-auto::-webkit-scrollbar {
-          width: 8px;
-        }
 
-        .overflow-y-auto::-webkit-scrollbar-track {
-          background: #1a1a1a; /* Dark track to blend with theme */
-          border-radius: 8px;
-          margin: 4px 0;
-        }
+          .overflow-y-auto::-webkit-scrollbar-track {
+            background: #1a1a1a; /* Dark track to blend with theme */
+            border-radius: 8px;
+            margin: 4px 0;
+          }
 
-        .overflow-y-auto::-webkit-scrollbar-thumb {
-          background: linear-gradient(
-            to bottom,
-            #4b4b4b,
-            #6b6b6b
-          ); /* Subtle gradient for modern look */
-          border-radius: 8px;
-          border: 2px solid #1a1a1a; /* Matches track for seamless look */
-        }
+          .overflow-y-auto::-webkit-scrollbar-thumb {
+            background: linear-gradient(
+              to bottom,
+              #4b4b4b,
+              #6b6b6b
+            ); /* Subtle gradient for modern look */
+            border-radius: 8px;
+            border: 2px solid #1a1a1a; /* Matches track for seamless look */
+          }
 
-        .overflow-y-auto::-webkit-scrollbar-thumb:hover {
-          background: linear-gradient(
-            to bottom,
-            #6b6b6b,
-            #8b8b8b
-          ); /* Lighter gradient on hover */
-        }
+          .overflow-y-auto::-webkit-scrollbar-thumb:hover {
+            background: linear-gradient(
+              to bottom,
+              #6b6b6b,
+              #8b8b8b
+            ); /* Lighter gradient on hover */
+          }
 
-        /* Custom Scrollbar for Firefox */
-        .overflow-y-auto {
-          scrollbar-width: thin;
-          scrollbar-color: #6b6b6b #1a1a1a; /* Thumb and track colors */
-        }
-      `}</style>
+          /* Custom Scrollbar for Firefox */
+          .overflow-y-auto {
+            scrollbar-width: thin;
+            scrollbar-color: #6b6b6b #1a1a1a; /* Thumb and track colors */
+          }
+        `}
+      </style>
     </>
   );
 };
