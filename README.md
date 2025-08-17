@@ -10,6 +10,9 @@
 - **Points of Information (POIs)**: Interrupt opponents mid-speech, just like real debates.  
 - **Live Speech-to-Text**: Powered by **Deepgram** for real-time transcription.  
 - **Role-Based Turn Management**: Accurate simulation of speaker order for each format.  
+- **Chatbot For analysing past debates**: Memory based Debate chatbot that can suggest improvements in performance and analyse past debates.
+- **Debate History Storage**: Get a complete overview of the past debates including the debate transcripts , results and documents uploaded.
+- **RAG based debates**: Upload documents as references for the AI-agents to debate on a particular topic.
 
 ---
 
@@ -18,9 +21,11 @@
 - **Frontend**: React + Vite + WebSockets  
 - **Backend**: Node.js (Express)  
 - **APIs**:  
-  - **Groq**: LLM responses for debaters/judge  
+  - **Groq (openai/gpt-oss)**: LLM responses for debaters/judge and RAG-based chatbot
   - **Deepgram**: Speech-to-text and TTS  
-  - **SerpAPI (Optional)**: Fact-checking for expert mode  
+  - **SerpAPI (Optional)**: Fact-checking for expert mode 
+  - **Langchain**: For implementing document based RAG system
+  - **Mongoose (MongoDB)** : For implementing the debate history
 
 ---
 
@@ -50,6 +55,7 @@ VITE_APP_EMAILJS_PUBLIC_KEY=""
 # Required APIs
 GROQ_API_KEY="your-groq-key"
 DEEPGRAM_API_KEY="your-deepgram-key"
+MONGO_URI="your-mongodb-uri"
 SERPAPI_API_KEY="your-serpapi-key"  # Optional for expert mode
 ```
 
