@@ -167,6 +167,10 @@ const DebatePage = () => {
   const [files, setFiles] = useState([]);
   const [isUploading, setIsUploading] = useState(false);
 
+  // --- NEW STATES FOR TIMER ---
+  const [timer, setTimer] = useState(0);
+  const [isTimerRunning, setIsTimerRunning] = useState(false);
+
   const [messages, setMessages] = useState([]);
   const [isRecording, setIsRecording] = useState(false);
   const [isMicWarmingUp, setIsMicWarmingUp] = useState(false);
@@ -189,6 +193,7 @@ const DebatePage = () => {
   const socketRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioRef = useRef(null);
+  const timerRef = useRef(null); // <-- Ref for the timer interval
   const transcriptRef = useRef("");
   const captionTimerRef = useRef(null);
   const clientIdRef = useRef(
@@ -304,6 +309,14 @@ const DebatePage = () => {
           setIsRecording(true);
           setIsMicWarmingUp(false);
           setCaption("Microphone is live. You may begin speaking.");
+          
+          // --- START TIMER ---
+          setTimer(0);
+          setIsTimerRunning(true);
+          if (timerRef.current) clearInterval(timerRef.current);
+          timerRef.current = setInterval(() => {
+            setTimer((prev) => prev + 1);
+          }, 1000);
         }
         break;
       case "agent_thinking":
@@ -437,6 +450,12 @@ const DebatePage = () => {
     setActiveSpeaker("");
     setIsUserTurn(false);
     setCaption("");
+
+    // --- STOP TIMER ---
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+    }
+    setIsTimerRunning(false);
   };
 
   const handleMicToggle = () => {
@@ -473,6 +492,7 @@ const DebatePage = () => {
     if(hasError) return;
     setTopicError(false);
     setRoleError(false);
+    setDebateTopic(inputValue); // Set the debate topic from the input field
 
     setIsUploading(true);
 
@@ -613,6 +633,21 @@ const DebatePage = () => {
   const handleDragLeave = (e) => {
     e.preventDefault();
     setIsDragOver(false);
+  };
+
+  // --- TIMER HELPER FUNCTIONS ---
+  const formatTime = (seconds) => {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${String(minutes).padStart(2, "0")}:${String(
+      remainingSeconds
+    ).padStart(2, "0")}`;
+  };
+
+  const getTimerColor = (seconds) => {
+    if (seconds >= 60) return "text-red-500";
+    if (seconds >= 30) return "text-yellow-500";
+    return "text-white";
   };
 
   // --- RENDER LOGIC ---
@@ -956,8 +991,19 @@ const DebatePage = () => {
 
   return (
     <div className="min-h-screen bg-black text-white flex flex-col relative overflow-hidden">
+      {/* --- TIMER DISPLAY --- */}
+      {isTimerRunning && (
+        <div
+          className={`fixed top-6 left-1/2 -translate-x-1/2 z-50 text-3xl font-mono font-bold transition-colors duration-300 ${getTimerColor(
+            timer
+          )}`}
+        >
+          {formatTime(timer)}
+        </div>
+      )}
+
       <audio ref={audioRef} autoPlay style={{ display: "none" }} />
-      <header className="w-full p-6 text-center">
+      <header className="w-full p-6 pt-20 text-center">
         <h1 className="text-2xl font-bold">
           {parliamentType === "british" ? "British" : "Asian"} Parliamentary
           Debate

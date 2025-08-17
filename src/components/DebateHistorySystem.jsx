@@ -1,4 +1,5 @@
 import { React, useState, useEffect, useCallback, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Calendar,
   MessageCircle,
@@ -112,9 +113,9 @@ const ClashCard = ({ clash }) => (
   </div>
 );
 
-// --- Debate Detail View ---
+// --- Debate Detail View (Exported for use in routing) ---
 
-const DebateDetailView = ({ debateId, onClose }) => {
+export const DebateDetailView = ({ debateId, onClose }) => {
   const [debate, setDebate] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -175,7 +176,7 @@ const DebateDetailView = ({ debateId, onClose }) => {
           <div className="max-w-6xl mx-auto flex items-center">
             <button
               onClick={onClose}
-              className="mr-4 p-2 rounded-lg bg-gray-800/50 hover:bg-gray-700/50 text-white transition-colors duration-200"
+              className="mr-4 p-2 rounded-lg bg-gray-800/50 hover:bg-gray-700/50 text-white transition-colors duration-200 cursor-pointer"
             >
               <ArrowLeft className="w-5 h-5" />
             </button>
@@ -391,12 +392,10 @@ const DebateDetailView = ({ debateId, onClose }) => {
 const DebateHistorySystem = ({ children }) => {
   const [debates, setDebates] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [closing, setClosing] = useState(false);
   const [error, setError] = useState(null);
   const [isSidebarOpen, setSidebarOpen] = useState(false);
-  const [selectedDebateId, setSelectedDebateId] = useState(null);
-
   const hasLoadedOnceRef = useRef(false);
+  const navigate = useNavigate();
 
   const fetchDebates = useCallback(async () => {
     const controller = new AbortController();
@@ -451,19 +450,13 @@ const DebateHistorySystem = ({ children }) => {
     }
   }, [fetchDebates, loading]);
 
-  const handleSelectDebate = useCallback((debateId) => {
-    setSelectedDebateId(debateId);
-    setSidebarOpen(false);
-  }, []);
-
-  const handleCloseDetailView = useCallback(async () => {
-    setClosing(true);
-    setSelectedDebateId(null);
-    setSidebarOpen(true);
-    await fetchDebates();
-    await new Promise((r) => requestAnimationFrame(() => r()));
-    setClosing(false);
-  }, [fetchDebates]);
+  const handleSelectDebate = useCallback(
+    (debateId) => {
+      setSidebarOpen(false);
+      navigate(`/debates/${debateId}`);
+    },
+    [navigate]
+  );
 
   return (
     <div className="relative min-h-screen bg-black">
@@ -477,7 +470,7 @@ const DebateHistorySystem = ({ children }) => {
       </div>
 
       {/* Sidebar Toggle Button */}
-      {!isSidebarOpen && !closing && (
+      {!isSidebarOpen && (
         <div className="fixed bottom-36 right-6 z-50">
           <button
             onClick={openSidebar}
@@ -594,21 +587,6 @@ const DebateHistorySystem = ({ children }) => {
           )}
         </div>
       </aside>
-
-      {/* Detail View */}
-      {selectedDebateId && !closing && (
-        <DebateDetailView
-          debateId={selectedDebateId}
-          onClose={handleCloseDetailView}
-        />
-      )}
-
-      {/* Full-page loading while returning home */}
-      {closing && (
-        <div className="fixed inset-0 bg-black z-60 flex items-center justify-center">
-          <LoadingSpinner text="Returning Home..." />
-        </div>
-      )}
 
       <style jsx>{`
         @keyframes pulse {
