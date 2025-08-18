@@ -1,3 +1,5 @@
+// server 1
+
 import express from "express";
 import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
@@ -6,11 +8,111 @@ import dotenv from "dotenv";
 import path from "path";
 import cors from 'cors';
 import { fileURLToPath } from 'url';
+import fs from "fs";
+import multer from 'multer';
+
+// --- MONGO DB INTEGRATION ---
+import mongoose from 'mongoose';
+
+// --- RAG INTEGRATION START ---
+// LangChain Document Loading & Splitting
+import { DirectoryLoader } from "langchain/document_loaders/fs/directory";
+import { TextLoader } from "langchain/document_loaders/fs/text";
+import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
+import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
+
+// LangChain Embeddings & Vector Store (all local)
+import { HuggingFaceTransformersEmbeddings } from "@langchain/community/embeddings/hf_transformers";
+import { FaissStore } from "@langchain/community/vectorstores/faiss";
+
+// RAG Configuration
+const BASE_DOCUMENTS_FOLDER = "src/server/reference_papers";
+const BASE_VECTOR_STORE_PATH = "src/server/faiss_index";
+const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
+
+/**
+ * MODIFIED: Creates or loads a FAISS vector store FOR A SPECIFIC SESSION.
+ * This is run for each new debate session.
+ * @param {string} clientId The unique ID for the current debate session.
+ * @returns {Promise<FaissStore|null>} The initialized vector store for the session, or null if no documents.
+ */
+async function getVectorStore(clientId) {
+  console.log(`[RAG for ${clientId}] Initializing session-specific document store...`);
+  const embeddings = new HuggingFaceTransformersEmbeddings({ modelName: EMBEDDING_MODEL });
+  
+  const sessionVectorStorePath = path.join(BASE_VECTOR_STORE_PATH, clientId);
+  const sessionDocumentsFolder = path.join(BASE_DOCUMENTS_FOLDER, clientId);
+
+  if (fs.existsSync(sessionVectorStorePath)) {
+    console.log(`[RAG for ${clientId}] ✅ Loading existing session vector store from disk...`);
+    return await FaissStore.load(sessionVectorStorePath, embeddings);
+  }
+
+  console.log(`[RAG for ${clientId}] ⏳ No existing vector store found. Creating a new one...`);
+
+  if (!fs.existsSync(sessionDocumentsFolder)) {
+    console.warn(`[RAG for ${clientId}] ⚠️ No document folder found. The agents will not have any external context for this session.`);
+    return null;
+  }
+
+  console.log(`[RAG for ${clientId}] - Loading documents...`);
+  const loader = new DirectoryLoader(sessionDocumentsFolder, {
+    ".pdf": (path) => new PDFLoader(path, { splitPages: false }),
+    ".txt": (path) => new TextLoader(path),
+  });
+  const docs = await loader.load();
+
+  if (docs.length === 0) {
+     console.warn(`[RAG for ${clientId}] ⚠️ No documents found in the session folder. The agents will not have any external context.`);
+     return null;
+  }
+  console.log(`[RAG for ${clientId}] - Loaded ${docs.length} document(s).`);
+
+  console.log(`[RAG for ${clientId}] - Splitting documents into chunks...`);
+  const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 200 });
+  const chunks = await splitter.splitDocuments(docs);
+  console.log(`[RAG for ${clientId}] - Created ${chunks.length} document chunks.`);
+
+  console.log(`[RAG for ${clientId}] - Generating embeddings and creating FAISS vector store (this may take a moment)...`);
+  const store = await FaissStore.fromDocuments(chunks, embeddings);
+  
+  if (!fs.existsSync(BASE_VECTOR_STORE_PATH)) {
+      fs.mkdirSync(BASE_VECTOR_STORE_PATH, { recursive: true });
+  }
+  await store.save(sessionVectorStorePath);
+  console.log(`[RAG for ${clientId}] ✅ Vector store created and saved to '${sessionVectorStorePath}'.`);
+
+  return store;
+}
+// --- RAG INTEGRATION END ---
+
 
 dotenv.config();
 
+// --- MONGO DB INTEGRATION ---
+// Define the Schema and Model for storing debate records
+const debateSchema = new mongoose.Schema({
+    clientId: { type: String, required: true, unique: true, index: true },
+    debateTopic: { type: String, required: true },
+    userRole: { type: String, required: true },
+    chatHistory: [{
+        speaker: String,
+        content: String,
+        timestamp: Date
+    }],
+    adjudicationResult: { type: mongoose.Schema.Types.Mixed }, // Store the JSON object
+    uploadedFiles: [{
+        filename: String,
+        data: Buffer, // Store file content as a Buffer
+        mimetype: String
+    }],
+    createdAt: { type: Date, default: Date.now }
+});
+
+const Debate = mongoose.model('Debate', debateSchema);
+
+
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const MASTER_PROMPT_INSTRUCTIONS = `
 CRITICAL INSTRUCTIONS:
@@ -113,7 +215,7 @@ class AIProvider {
   async callGroq(prompt, systemPrompt, isJsonMode = false) {
     try {
       const body = {
-        model: "llama3-8b-8192",
+        model: "openai/gpt-oss-20b",
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: prompt }
@@ -215,7 +317,10 @@ class SerpApiSearch {
 
 // Unified Agent Class
 class VoiceAgent {
-  constructor(name, role, prompt, voiceModel, conversationContext, serpApiSearch = null) {
+  // --- RAG INTEGRATION START ---
+  // Modified constructor to accept the vector store
+  constructor(name, role, prompt, voiceModel, conversationContext, vectorStore, serpApiSearch = null) {
+  // --- RAG INTEGRATION END ---
     this.name = name;
     this.role = role;
     this.prompt = prompt;
@@ -226,6 +331,9 @@ class VoiceAgent {
     this.deepgramClient = createClient(process.env.DEEPGRAM_API_KEY);
     this.serpApiSearch = serpApiSearch;
     this.interruptedStatement = null;
+    // --- RAG INTEGRATION START ---
+    this.vectorStore = vectorStore; // Store the vector store instance
+    // --- RAG INTEGRATION END ---
   }
 
   // This MUST be a static property to be shared across all instances
@@ -238,15 +346,9 @@ class VoiceAgent {
 
       if (!rawResponse) continue;
 
-      // *** YOUR SUGGESTED WHITELIST REGEX SANITIZER ***
-      // This regex allows letters (a-z, A-Z), numbers (0-9), spaces, and basic punctuation (. , ? ! ' " -).
-      // Everything else is removed.
       const sanitized = rawResponse.replace(/[^a-zA-Z0-9\s.,?!'"-]/g, ' ');
-
-      // Condense whitespace that might be left over from the replacement
       const cleanResponse = sanitized.trim().replace(/\s+/g, ' ');
 
-      // Check for common conversational filler/refusal phrases from the LLM
       const refusalPatterns = [
         /^I cannot/i,
         /^I'm sorry/i,
@@ -258,7 +360,7 @@ class VoiceAgent {
 
       if (cleanResponse.length > 15 && !isRefusal) {
         console.log(`LLM attempt ${i + 1} successful.`);
-        return cleanResponse; // Return the super-clean, valid response
+        return cleanResponse;
       }
 
       console.warn(`LLM attempt ${i + 1} failed (too short or refusal). Cleaned response: "${cleanResponse}"`);
@@ -268,64 +370,76 @@ class VoiceAgent {
     return "I must yield the floor. My apologies.";
   }
 
-
+  // --- RAG INTEGRATION START ---
+  // The generateResponse method is completely replaced with the RAG-aware version.
   async generateResponse(userInput, isUserInterruption = false, debatePrompt = null, userLevel = 'beginner') {
     const mainInput = debatePrompt && !userInput ? debatePrompt : userInput;
     const conversationHistory = this.conversationContext.getHistory();
     let systemPrompt = `${this.prompt}\n${MASTER_PROMPT_INSTRUCTIONS}`;
 
     try {
-      let finalResponse; // Declare finalResponse here to be accessible throughout the try block
+      let retrievedContext = "No specific documents were found to be relevant for this point.";
+      let finalResponse;
 
-      // --- Step 1: Define the Agent's Immediate Task (Role-Aware Context) ---
-      let taskPrompt = "";
-      if (!mainInput) {
-        // This is the first speaker
-        taskPrompt = `You are the first speaker. Please open the debate with your initial statement.`;
-        finalResponse = await this.getSanitizedLLMResponse(taskPrompt, systemPrompt);
+      // Step 1: Retrieve relevant documents from the vector store if it exists
+      if (this.vectorStore && mainInput) {
+        console.log(`[RAG] Agent ${this.name} is retrieving documents based on: "${mainInput.substring(0, 100)}..."`);
+        const retriever = this.vectorStore.asRetriever(6); // Get top 6 relevant chunks
+        const relevantDocs = await retriever.getRelevantDocuments(mainInput);
 
-      } else if (userLevel === 'expert' && this.serpApiSearch) {
-        // --- Expert Logic Path ---
-        console.log(`[EXPERT MODE] Agent ${this.name} is thinking...`);
-
-        const searchQueryGenPrompt = `Your role is ${this.role}. The last speaker said: "${mainInput}". Based on your role, what is the most effective fact or claim to verify with a web search to build your argument? Respond with a concise Google search query, or "NONE".\n${MASTER_PROMPT_INSTRUCTIONS}`;
-        const searchQuery = await this.getSanitizedLLMResponse(searchQueryGenPrompt, systemPrompt);
-
-        let searchResultsText = "No web search was performed.";
-        if (searchQuery && searchQuery.toUpperCase() !== 'NONE') {
-          console.log(`[EXPERT MODE] ${this.name} searching for: "${searchQuery}"`);
-          const searchData = await this.serpApiSearch.search(searchQuery);
-          if (searchData && searchData.organic_results) {
-            searchResultsText = "Recent web search results:\n" + searchData.organic_results.slice(0, 3).map(r => r.snippet).join('\n');
-          }
+        if (relevantDocs.length > 0) {
+          retrievedContext = relevantDocs.map((doc, i) => `Source ${i+1}: ${doc.pageContent}`).join("\n\n");
+          console.log(`[RAG] Found ${relevantDocs.length} relevant document chunks.`);
+        } else {
+          console.log(`[RAG] No relevant documents found for the input.`);
         }
-
-        taskPrompt = `The previous speaker said: "${mainInput}".
-        Here are the results of a web search you just performed:
-        ---
-        ${searchResultsText}
-        ---
-        Based on your specific role as ${this.role}, and the search results, formulate your response.`;
-        finalResponse = await this.getSanitizedLLMResponse(taskPrompt, systemPrompt);
-
-      } else {
-        // --- BEGINNER/INTERMEDIATE LOGIC PATH ---
-        // We need to use a different system prompt here that includes the conversation history
-        const beginnerSystemPrompt = `${this.prompt}\n\nPrevious conversation:\n${conversationHistory}\n${MASTER_PROMPT_INSTRUCTIONS}`;
-        taskPrompt = `The previous speaker said: "${mainInput}". Based on your specific role as ${this.role}, formulate your response.`;
-        finalResponse = await this.getSanitizedLLMResponse(taskPrompt, beginnerSystemPrompt);
+      } else if (!this.vectorStore) {
+        console.log("[RAG] Vector store not available. Skipping document retrieval.");
       }
 
-      // The finalResponse is now guaranteed to be clean and valid by getSanitizedLLMResponse.
+      // Step 2: Construct the task prompt, now including the retrieved context
+      let taskPrompt = "";
+      if (!mainInput) {
+        // This is the first speaker, no context needed
+        taskPrompt = `You are the first speaker. Please open the debate with your initial statement.`;
+      } else {
+        // All subsequent speakers get the RAG context
+        taskPrompt = `
+        **Previous Conversation:**
+        ${conversationHistory}
+
+        **The previous speaker said:** "${mainInput}"
+
+        **Retrieved Context from Reference Documents:**
+        ---
+        ${retrievedContext}
+        ---
+
+        **YOUR CRITICAL TASK:**
+        You are ${this.name}, the ${this.role}.
+        1. **Analyze the retrieved context:** Identify facts, statistics, or arguments from the documents that support your position or refute the opponent.
+        2. **Synthesize, Don't Copy:** You MUST integrate the information from the context naturally into your own speech. DO NOT simply copy and paste sentences from the context.
+        3. **Formulate Your Response:** Based on your role, the conversation history, and ESPECIALLY the retrieved context, formulate your next statement in the debate.
+        4. **Cite Your Source (If Applicable):** If you use a specific fact, you can mention it comes from the provided materials, e.g., "According to the provided policy brief..." or "The statistics in our documents show...".
+        5. **Stay in Character:** Deliver this evidence-based response in your assigned role.
+
+        Formulate your concise and powerful response now.
+        `;
+      }
+      
+      // Step 3: Generate the response using the augmented prompt
+      finalResponse = await this.getSanitizedLLMResponse(taskPrompt, systemPrompt);
+
       this.interruptedStatement = finalResponse;
-      // The message is added in the PipelineManager, so we just return the text.
       return finalResponse;
 
     } catch (error) {
-      console.error(`Error generating response for ${this.name}:`, error);
+      console.error(`Error generating RAG-based response for ${this.name}:`, error);
       return "I'm sorry, I seem to have lost my train of thought.";
     }
   }
+  // --- RAG INTEGRATION END ---
+
 
   async generatePoiResponse(poiTranscript) {
     if (!this.interruptedStatement) {
@@ -568,7 +682,7 @@ class TurnManager {
       3, // Deputy Prime Minister (Government)
       4, // Deputy Leader of Opposition (Opposition)
       5, // Government Whip (Government)
-      6  // Opposition Whip (Opposition)
+      6, // Opposition Whip (Opposition)
     ];
 
     const currentIndex = turnOrder.indexOf(this.currentTurnIndex);
@@ -722,6 +836,10 @@ class UnifiedConnectionManager {
 
     this.isReconnecting = false;
     this.userPoiCount = 0;
+
+    // --- MONGO DB INTEGRATION ---
+    // Property to hold the last generated feedback
+    this.lastAdjudicationResult = null;
 
     this.agents.forEach(agent => agent.connectionManager = this);
     this.setupDeepgram();
@@ -1159,12 +1277,75 @@ class UnifiedConnectionManager {
     }
   }
 
-  cleanup() {
+  async cleanup() {
     console.log(`Cleaning up connection for client ${this.clientId}`);
     if (this.keepAlive) clearInterval(this.keepAlive);
     if (this.deepgram) {
       this.deepgram.finish();
       this.deepgram.removeAllListeners();
+    }
+    
+    // --- MONGO DB INTEGRATION ---
+    // Save the debate record to MongoDB before deleting local files
+    try {
+        // Only save if the debate has actually started (more than 1 message)
+        if (this.conversationContext.messages.length > 1) {
+            console.log(`[DB Save for ${this.clientId}] Preparing to save debate record.`);
+
+            const sessionDocsPath = path.join(BASE_DOCUMENTS_FOLDER, this.clientId);
+            const uploadedFiles = [];
+
+            if (fs.existsSync(sessionDocsPath)) {
+                const filenames = await fs.promises.readdir(sessionDocsPath);
+                for (const filename of filenames) {
+                    const filePath = path.join(sessionDocsPath, filename);
+                    const fileData = await fs.promises.readFile(filePath);
+                    // A simple way to guess mimetype
+                    const mimetype = path.extname(filename) === '.pdf' ? 'application/pdf' : 'text/plain';
+                    uploadedFiles.push({ filename, data: fileData, mimetype });
+                }
+            }
+
+            const debateRecord = new Debate({
+                clientId: this.clientId,
+                debateTopic: this.turnManager.debateTopic,
+                userRole: this.turnManager.userRole,
+                chatHistory: this.conversationContext.messages,
+                adjudicationResult: this.lastAdjudicationResult,
+                uploadedFiles: uploadedFiles
+            });
+
+            await debateRecord.save();
+            console.log(`[DB Save for ${this.clientId}] ✅ Successfully saved debate record to MongoDB.`);
+        } else {
+            console.log(`[DB Save for ${this.clientId}] Skipping save, debate was too short.`);
+        }
+    } catch (error) {
+        console.error(`[DB Save for ${this.clientId}] ❌ Error saving debate record to MongoDB:`, error);
+    } finally {
+        // --- LOCAL FILE CLEANUP (runs regardless of DB save success) ---
+        try {
+            const sessionDocsPath = path.join(BASE_DOCUMENTS_FOLDER, this.clientId);
+            const sessionIndexPath = path.join(BASE_VECTOR_STORE_PATH, this.clientId);
+            
+            console.log(`[Cleanup for ${this.clientId}] Deleting session document folder: ${sessionDocsPath}`);
+            if (fs.existsSync(sessionDocsPath)) {
+                await fs.promises.rm(sessionDocsPath, { recursive: true, force: true });
+                console.log(`[Cleanup for ${this.clientId}] ✅ Session documents deleted.`);
+            } else {
+                console.log(`[Cleanup for ${this.clientId}] Session document folder not found, skipping.`);
+            }
+            
+            console.log(`[Cleanup for ${this.clientId}] Deleting session vector store index: ${sessionIndexPath}`);
+            if (fs.existsSync(sessionIndexPath)) {
+                await fs.promises.rm(sessionIndexPath, { recursive: true, force: true });
+                console.log(`[Cleanup for ${this.clientId}] ✅ Session vector store deleted.`);
+            } else {
+                console.log(`[Cleanup for ${this.clientId}] Session vector store not found, skipping.`);
+            }
+        } catch (error) {
+            console.error(`[Cleanup for ${this.clientId}] Error during file cleanup:`, error);
+        }
     }
   }
 }
@@ -1285,6 +1466,44 @@ class VoiceAssistantApp {
     this.app.use(express.json());
     this.app.use(express.static("public/"));
 
+    // --- NEW: Multer configuration for file uploads ---
+    const storage = multer.diskStorage({
+        destination: (req, file, cb) => {
+            const clientId = req.body.clientId;
+            if (!clientId) {
+                return cb(new Error('Client ID is required for upload'), null);
+            }
+            const dir = path.join(BASE_DOCUMENTS_FOLDER, clientId);
+            fs.mkdirSync(dir, { recursive: true });
+            cb(null, dir);
+        },
+        filename: (req, file, cb) => {
+            // Sanitize filename to prevent directory traversal
+            const safeFilename = path.basename(file.originalname);
+            cb(null, safeFilename);
+        }
+    });
+    
+    const upload = multer({ 
+        storage: storage,
+        limits: { fileSize: 20 * 1024 * 1024 }, // 20MB file size limit
+        fileFilter: (req, file, cb) => {
+            if (file.mimetype === 'application/pdf' || file.mimetype === 'text/plain') {
+                cb(null, true);
+            } else {
+                cb(new Error('Only .pdf and .txt files are allowed!'), false);
+            }
+        }
+    });
+
+
+    // --- NEW: File upload endpoint ---
+    this.app.post('/api/upload-papers', upload.array('papers', 10), (req, res) => {
+        res.status(200).json({ message: 'Files uploaded successfully!', files: req.files.map(f => f.originalname) });
+    }, (error, req, res, next) => {
+        res.status(400).json({ message: error.message });
+    });
+
     this.app.get("/api/tts-audio/:sessionId", (req, res) => {
       const sessionId = req.params.sessionId;
       const audioBuffer = VoiceAgent.audioCache.get(sessionId);
@@ -1297,11 +1516,15 @@ class VoiceAssistantApp {
     });
 
     this.app.get("/", (req, res) => {
-      res.sendFile(__dirname + "/public/index.html");
+      res.sendFile("/public/index.html");
     });
 
     this.app.post("/api/clear-context/:clientId", (req, res) => {
-      this.conversationContext.clear();
+      // This route is likely obsolete with session-based context, but kept for compatibility
+      const connection = this.connections.get(req.params.clientId);
+      if (connection && connection.conversationContext) {
+        connection.conversationContext.clear();
+      }
       res.json({ success: true, message: "Context cleared" });
     });
 
@@ -1310,22 +1533,18 @@ class VoiceAssistantApp {
         status: "healthy",
         timestamp: new Date().toISOString(),
         activeConnections: this.wss.clients.size,
-        agents: this.agents.map(a => ({ name: a.name, role: a.role })),
-        conversationLength: this.conversationContext.messages.length
       });
     });
 
     this.app.post("/api/get-feedback", async (req, res) => {
       try {
         const { clientId } = req.body;
-        // Let's rename 'connection' to 'connectionManager' for clarity, as that is what we are retrieving.
         const connectionManager = this.connections.get(clientId);
 
         if (!connectionManager) {
           return res.status(404).json({ error: "Client session not found." });
         }
 
-        // CORRECTED LOGIC: Access properties directly from the connectionManager.
         const conversationContext = connectionManager.conversationContext;
         const turnManager = connectionManager.turnManager;
 
@@ -1360,6 +1579,11 @@ class VoiceAssistantApp {
         }
 
         const feedback = await this.judgeAgent.generateFeedback(history, userRole, debateTopic, judgingInstruction, poiCount);
+        
+        // --- MONGO DB INTEGRATION ---
+        // Store the generated feedback on the connection manager instance so it can be saved on exit
+        connectionManager.lastAdjudicationResult = feedback;
+        
         res.json({ ...feedback, userPoiCount: poiCount });
 
       } catch (error) {
@@ -1373,14 +1597,13 @@ class VoiceAssistantApp {
     this.wss.on("connection", (ws) => {
       let clientId = null;
 
-      ws.on("message", (message) => {
+      ws.on("message", async (message) => {
         console.log(`ws: received message of type: ${typeof message}, isBuffer: ${Buffer.isBuffer(message)}`);
 
         try {
           const data = JSON.parse(message.toString());
 
           if (data.type === 'user_role_selected') {
-            // 1. Use the ID from the client instead of generating a new one.
             clientId = data.clientId;
             if (!clientId) {
               console.error("Fatal: user_role_selected message received without a clientId. Closing connection.");
@@ -1394,7 +1617,9 @@ class VoiceAssistantApp {
             const debateTopic = data.topic || "Is social media beneficial for society?";
             const conversationContext = new ConversationContext();
 
-            // 2. The rest of your agent creation logic remains the same.
+            // --- RAG INTEGRATION: Create session-specific vector store ---
+            const vectorStore = await getVectorStore(clientId);
+
             const allVoices = [
               'aura-2-amalthea-en', 'aura-2-andromeda-en', 'aura-2-apollo-en', 'aura-2-arcas-en', 'aura-2-aries-en',
               'aura-2-asteria-en', 'aura-2-athena-en', 'aura-2-atlas-en', 'aura-2-aurora-en', 'aura-2-callista-en', 'aura-2-cora-en',
@@ -1414,110 +1639,51 @@ class VoiceAssistantApp {
             };
 
             const shuffledVoices = shuffle([...allVoices]);
+
             const agents = [
               new VoiceAgent(
-                "Moderator",
-                "Parliamentary Debate Moderator",
-                // The Moderator's prompt focuses on their neutral role, referencing the topic clearly.
-                `You are a skilled and impartial parliamentary debate moderator. Your role is to guide the discussion, maintain order, and ensure a balanced debate.
-        - The motion for today's debate is: "${debateTopic}"
-        - You must remain completely neutral, showing no preference for either side.
-        - Your tasks include introducing the topic, calling on speakers in the correct order, asking clarifying questions to both sides, and summarizing key arguments.
-        - You speak with authority, clarity, and fairness.
-        - ${noStageDirectionsPrompt}`,
-                shuffledVoices.pop() || 'aura-2-thalia-en',
-                conversationContext,
-                this.serpApiSearch
+                "Moderator", "Parliamentary Debate Moderator",
+                `You are a skilled and impartial parliamentary debate moderator. Your role is to guide the discussion, maintain order, and ensure a balanced debate.\n- The motion for today's debate is: "${debateTopic}"\n- You must remain completely neutral, showing no preference for either side.\n- Your tasks include introducing the topic, calling on speakers in the correct order, asking clarifying questions to both sides, and summarizing key arguments.\n- You speak with authority, clarity, and fairness.\n- ${noStageDirectionsPrompt}`,
+                shuffledVoices.pop() || 'aura-2-thalia-en', conversationContext, vectorStore, this.serpApiSearch
               ),
               new VoiceAgent(
-                "Prime Minister",
-                "Government Leader",
-                // This prompt clearly separates the role from the stance on the motion.
-                `You are the Prime Minister and the leader of the Government. You are a powerful, confident, and persuasive speaker.
-        - The motion for today's debate is: "${debateTopic}"
-        - Your government's position is to STRONGLY SUPPORT this motion. ${agentDifficultyPrompt}
-        - You must build a compelling case in favor of the motion, using evidence, logical reasoning, and rhetorical skill. You set the tone for your entire side of the debate. 
-        - ${noStageDirectionsPrompt}`,
-                shuffledVoices.pop() || 'aura-2-apollo-en',
-                conversationContext,
-                this.serpApiSearch
+                "Prime Minister", "Government Leader",
+                `You are the Prime Minister and the leader of the Government. You are a powerful, confident, and persuasive speaker.\n- The motion for today's debate is: "${debateTopic}"\n- Your government's position is to STRONGLY SUPPORT this motion. ${agentDifficultyPrompt}\n- You must build a compelling case in favor of the motion, using evidence, logical reasoning, and rhetorical skill. You set the tone for your entire side of the debate. \n- ${noStageDirectionsPrompt}`,
+                shuffledVoices.pop() || 'aura-2-apollo-en', conversationContext, vectorStore, this.serpApiSearch
               ),
               new VoiceAgent(
-                "Leader of Opposition",
-                "Opposition Leader",
-                // This mirrors the Prime Minister's prompt but with the opposing view.
-                `You are the Leader of the Opposition. You are a sharp, critical, and passionate speaker, skilled at finding flaws in arguments.
-        - The motion for today's debate is: "${debateTopic}"
-        - Your party's position is to STRONGLY OPPOSE this motion. ${agentDifficultyPrompt}
-        - You must dismantle the government's case and build a compelling counter-argument against the motion. Your goal is to convince everyone that the motion is misguided.
-        - ${noStageDirectionsPrompt}`,
-                shuffledVoices.pop() || 'aura-2-arcas-en',
-                conversationContext,
-                this.serpApiSearch
+                "Leader of Opposition", "Opposition Leader",
+                `You are the Leader of the Opposition. You are a sharp, critical, and passionate speaker, skilled at finding flaws in arguments.\n- The motion for today's debate is: "${debateTopic}"\n- Your party's position is to STRONGLY OPPOSE this motion. ${agentDifficultyPrompt}\n- You must dismantle the government's case and build a compelling counter-argument against the motion. Your goal is to convince everyone that the motion is misguided.\n- ${noStageDirectionsPrompt}`,
+                shuffledVoices.pop() || 'aura-2-arcas-en', conversationContext, vectorStore, this.serpApiSearch
               ),
               new VoiceAgent(
-                "Deputy Prime Minister",
-                "Government Deputy",
-                // The supporting roles are now clearly defined.
-                `You are the Deputy Prime Minister. You are a loyal and articulate supporter of the government's position.
-        - The motion for today's debate is: "${debateTopic}"
-        - Your role is to reinforce the Prime Minister's arguments, introduce new points that SUPPORT the motion, and rebut the Opposition's claims. ${agentDifficultyPrompt}
-        - You speak with conviction and unwavering support for your side.
-        - ${noStageDirectionsPrompt}`,
-                shuffledVoices.pop() || 'aura-2-asteria-en',
-                conversationContext,
-                this.serpApiSearch
+                "Deputy Prime Minister", "Government Deputy",
+                `You are the Deputy Prime Minister. You are a loyal and articulate supporter of the government's position.\n- The motion for today's debate is: "${debateTopic}"\n- Your role is to reinforce the Prime Minister's arguments, introduce new points that SUPPORT the motion, and rebut the Opposition's claims. ${agentDifficultyPrompt}\n- You speak with conviction and unwavering support for your side.\n- ${noStageDirectionsPrompt}`,
+                shuffledVoices.pop() || 'aura-2-asteria-en', conversationContext, vectorStore, this.serpApiSearch
               ),
               new VoiceAgent(
-                "Deputy Leader of Opposition",
-                "Opposition Deputy",
-                `You are the Deputy Leader of the Opposition. You are a determined and detail-oriented debater.
-        - The motion for today's debate is: "${debateTopic}"
-        - Your role is to support your leader by attacking the government's case, providing new arguments AGAINST the motion, and exposing weaknesses in their logic. ${agentDifficultyPrompt}
-        - You speak with concern and firm opposition.
-        - ${noStageDirectionsPrompt}`,
-                shuffledVoices.pop() || 'aura-2-atlas-en',
-                conversationContext,
-                this.serpApiSearch
+                "Deputy Leader of Opposition", "Opposition Deputy",
+                `You are the Deputy Leader of the Opposition. You are a determined and detail-oriented debater.\n- The motion for today's debate is: "${debateTopic}"\n- Your role is to support your leader by attacking the government's case, provide new arguments AGAINST the motion, and exposing weaknesses in their logic. ${agentDifficultyPrompt}\n- You speak with concern and firm opposition.\n- ${noStageDirectionsPrompt}`,
+                shuffledVoices.pop() || 'aura-2-atlas-en', conversationContext, vectorStore, this.serpApiSearch
               ),
               new VoiceAgent(
-                "Government Whip",
-                "Government Whip",
-                `You are the Government Whip. Your focus is on summarizing and reinforcing your side's arguments with clarity and discipline.
-        - The motion for today's debate is: "${debateTopic}"
-        - Your task is to summarize the key points made by your Prime Minister and Deputy, crystallize your government's position, and show why your side has won the debate. You must strongly SUPPORT the motion. ${agentDifficultyPrompt}
-        - You speak with party loyalty and a focus on practical, powerful summaries.
-        - ${noStageDirectionsPrompt}`,
-                shuffledVoices.pop() || 'aura-2-callista-en',
-                conversationContext,
-                this.serpApiSearch
+                "Government Whip", "Government Whip",
+                `You are the Government Whip. Your focus is on summarizing and reinforcing your side's arguments with clarity and discipline.\n- The motion for today's debate is: "${debateTopic}"\n- Your task is to summarize the key points made by your Prime Minister, Deputy, and Member, crystallize your government's position, and show why your side has won the debate. You must strongly SUPPORT the motion. ${agentDifficultyPrompt}\n- You speak with party loyalty and a focus on practical, powerful summaries.\n- ${noStageDirectionsPrompt}`,
+                shuffledVoices.pop() || 'aura-2-callista-en', conversationContext, vectorStore, this.serpApiSearch
               ),
               new VoiceAgent(
-                "Opposition Whip",
-                "Opposition Whip",
-                `You are the Opposition Whip. Your focus is on summarizing and reinforcing your side's arguments to deliver a final, decisive blow.
-        - The motion for today's debate is: "${debateTopic}"
-        - Your task is to summarize the key arguments from your Leader and Deputy, highlight the failures of the government's case, and make a final, passionate plea for why the motion must be rejected. ${agentDifficultyPrompt}
-        - You speak with party loyalty and protective concern for the principles you are defending.
-        - ${noStageDirectionsPrompt}`,
-                shuffledVoices.pop() || 'aura-2-delia-en',
-                conversationContext,
-                this.serpApiSearch
+                "Opposition Whip", "Opposition Whip",
+                `You are the Opposition Whip. Your focus is on summarizing and reinforcing your side's arguments to deliver a final, decisive blow.\n- The motion for today's debate is: "${debateTopic}"\n- Your task is to summarize the key arguments from your Leader, Deputy, and Member, highlight the failures of the government's case, and make a final, passionate plea for why the motion must be rejected. ${agentDifficultyPrompt}\n- You speak with party loyalty and protective concern for the principles you are defending.\n- ${noStageDirectionsPrompt}`,
+                shuffledVoices.pop() || 'aura-2-delia-en', conversationContext, vectorStore, this.serpApiSearch
               ),
             ];
+
             const speechAnalyzer = new SpeechAnalyzer();
-
-            // 3. Create the connection manager.
             const connectionManager = new UnifiedConnectionManager(ws, clientId, agents, speechAnalyzer, conversationContext);
-
-            // 4. Store the manager using the client-provided ID.
             this.connections.set(clientId, connectionManager);
-
-            // 5. Handle the role selection to start the debate.
             connectionManager.handleUserRoleSelection(data.role, data.topic, data.level);
 
           } else if (this.connections.has(clientId)) {
-            // All subsequent messages are routed to the existing connection manager
             const connectionManager = this.connections.get(clientId);
             switch (data.type) {
               case 'tts_playback_complete':
@@ -1533,26 +1699,27 @@ class VoiceAssistantApp {
           }
 
         } catch (error) {
-          // If JSON.parse fails, assume it's raw audio data and forward it
           if (clientId && this.connections.has(clientId)) {
             this.connections.get(clientId).sendMessage(message);
           }
         }
       });
 
-      ws.on("close", () => {
-        // Now this will log the correct, client-provided ID.
+      ws.on("close", async () => {
         console.log(`ws: client ${clientId} disconnected`);
         if (clientId && this.connections.has(clientId)) {
           const connectionMgr = this.connections.get(clientId);
           if (connectionMgr) {
-            connectionMgr.cleanup();
+            await connectionMgr.cleanup();
             this.connections.delete(clientId);
           }
         }
       });
     });
   }
+
+
+
 
   start(port = 3001) {
     this.server.listen(port, () => {
@@ -1561,10 +1728,28 @@ class VoiceAssistantApp {
       console.log('- DEEPGRAM_API_KEY:', process.env.DEEPGRAM_API_KEY ? 'Present' : 'Missing');
       console.log('- GROQ_API_KEY:', process.env.GROQ_API_KEY ? 'Present' : 'Missing');
       console.log('- SERPAPI_API_KEY:', process.env.SERPAPI_API_KEY ? 'Present' : 'Missing');
+      // --- MONGO DB INTEGRATION ---
+      console.log('- MONGO_URI:', process.env.MONGO_URI ? 'Present' : 'Missing');
+      
+      if (!process.env.MONGO_URI) {
+        console.warn("⚠️ MONGO_URI not found in .env file. Debate history will not be saved.");
+      } else {
+        mongoose.connect(process.env.MONGO_URI)
+            .then(() => console.log("✅ MongoDB connection successful."))
+            .catch(err => console.error("❌ MongoDB connection error:", err));
+      }
     });
   }
 }
 
 // Initialize and start the application
 const app = new VoiceAssistantApp();
+
+
+/**
+ * @route   GET /api/debates
+ * @desc    Get all debate sessions (lightweight version for list view)
+ * @access  Public
+ */
+
 app.start(3001);

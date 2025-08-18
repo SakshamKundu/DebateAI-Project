@@ -176,19 +176,19 @@ const expLogos = [
 const socialImgs = [
   {
     name: "insta",
-    imgPath: "/images/insta.png",
+    imgPath: "/images/insta.svg",
   },
   {
     name: "fb",
-    imgPath: "/images/fb.png",
+    imgPath: "/images/fb.svg",
   },
   {
     name: "x",
-    imgPath: "/images/x.png",
+    imgPath: "/images/twitter.svg",
   },
   {
     name: "linkedin",
-    imgPath: "/images/linkedin.png",
+    imgPath: "/images/linkedin.svg",
   },
 ];
 
