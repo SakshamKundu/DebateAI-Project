@@ -93,8 +93,7 @@ app.get('/api/debates/:debateId', async (req, res) => {
     }
 
     res.json({ success: true, data: debate });
-  } catch (error)
-  {
+  } catch (error) {
     console.error('Error fetching debate details:', error);
     res.status(500).json({
       success: false,
@@ -124,71 +123,67 @@ app.post('/api/debates', async (req, res) => {
   }
 });
 
-const formatDebateForLLM = (debate) => {
-  const limitedChatHistory = debate.chatHistory.slice(-10);
-  const chatHistoryText = limitedChatHistory
-    .map(chat => `${chat.speaker}: ${chat.content}`)
-    .join('\n');
+const formatSingleDebateSummary = (debate) => {
+  if (!debate) return "Debate information not available.";
 
-  const adjudicationText = debate.adjudicationResult && Object.keys(debate.adjudicationResult).length > 0
-    ? `Adjudication Result:\n${JSON.stringify(debate.adjudicationResult, null, 2)}`
-    : 'No adjudication result available.';
+  const adjudicationSummary = debate.adjudicationResult?.overallSummary
+    ? `Adjudication Summary: ${debate.adjudicationResult.overallSummary}`
+    : 'No adjudication summary is available for this debate.';
 
   return `
-  --- DEBATE START ---
+--- DEBATE SUMMARY ---
 Debate Topic: ${debate.debateTopic}
-Your Role: ${debate.userRole}
+Your Role in this Debate: ${debate.userRole}
 Date: ${new Date(debate.createdAt).toDateString()}
-
-Chat History:
-${chatHistoryText}
-
-${adjudicationText}
---- DEBATE END ---
+Summary:
+${adjudicationSummary}
+--- END SUMMARY ---
   `.trim();
 };
 
+// --- NEW MERGED AND CORRECTED formatDebatesForLLM FUNCTION ---
 const formatDebatesForLLM = (debates, questionHistory, currentQuestion) => {
-  // Format question history
   const questionHistoryText = questionHistory && questionHistory.length > 0
-    ? `Recent Questions (most recent last):\n${questionHistory
-        .map((q, i) => `${i + 1}. ${q}`)
-        .join('\n')}`
-    : 'No previous questions available.';
+    ? `Previous Questions:\n${questionHistory.map((q, i) => `${i + 1}. ${q}`).join('\n')}`
+    : '';
 
-  // Check if the current question is a follow-up referring to the most recent debate
-  let context = '';
-  if (currentQuestion.toLowerCase().includes('that particular debate') && questionHistory.length > 0) {
+  let debateContext = '';
+
+  const isFollowUp = currentQuestion.toLowerCase().includes('that debate') || currentQuestion.toLowerCase().includes('that one');
+
+  if (isFollowUp && questionHistory.length > 0) {
     const lastQuestion = questionHistory[questionHistory.length - 1].toLowerCase();
-    if (lastQuestion.includes('last debate') || lastQuestion.includes('most recent debate')) {
-      // Assume the first debate is the most recent (sorted by createdAt)
+    let relevantDebate = null;
+
+    // First, try to find a debate topic mentioned in the last question
+    relevantDebate = debates.find(debate => lastQuestion.includes(debate.debateTopic.toLowerCase()));
+
+    // If not found, check if they asked about the "last" or "most recent" debate
+    if (!relevantDebate && (lastQuestion.includes('last debate') || lastQuestion.includes('most recent'))) {
       if (debates.length > 0) {
-        context = `**Relevant Debate (from most recent question)**:\n${formatDebateForLLM(debates[0])}`;
-      } else {
-        context = 'No debate history found for the most recent question.';
-      }
-    } else {
-      // Try to match the last question to a debate topic
-      const matchedDebate = debates.find(debate => 
-        lastQuestion.includes(debate.debateTopic.toLowerCase())
-      );
-      if (matchedDebate) {
-        context = `**Relevant Debate (from most recent question)**:\n${formatDebateForLLM(matchedDebate)}`;
-      } else {
-        context = 'Could not identify the specific debate referred to in the most recent question.';
+        relevantDebate = debates[0]; // Debates are pre-sorted, so the first one is the most recent
       }
     }
-  } else {
-    // Include all debates for non-follow-up questions
-    if (!debates || debates.length === 0) {
-      context = 'No debate history found.';
+
+    if (relevantDebate) {
+      // If we found a specific debate, only provide the context for that one.
+      debateContext = `Based on your previous question, here are the details for the relevant debate:\n${formatSingleDebateSummary(relevantDebate)}`;
     } else {
-      context = debates.map(debate => `--- DEBATE START ---\n${formatDebateForLLM(debate)}\n--- DEBATE END ---`).join('\n\n');
+      // If we can't figure out which one, provide all summaries as a fallback.
+      debateContext = "I couldn't determine which specific debate you're referring to. Here are summaries of all recent debates instead:\n" + debates.map(formatSingleDebateSummary).join('\n\n');
+    }
+  } else {
+    // This is not a follow-up question, so provide summaries for all debates.
+    if (!debates || debates.length === 0) {
+      debateContext = "No debate history found.";
+    } else {
+      debateContext = "Here are summaries of your recent debates:\n" + debates.map(formatSingleDebateSummary).join('\n\n');
     }
   }
 
-  return `${questionHistoryText}\n\n${context}`;
+  return `${questionHistoryText}\n\n${debateContext}`.trim();
 };
+
 
 // RAG Chat Endpoint
 app.post('/api/chat/rag', async (req, res) => {
@@ -200,7 +195,7 @@ app.post('/api/chat/rag', async (req, res) => {
 
   try {
     const query = clientId ? { clientId } : {};
-    const debates = await Debate.find(query).sort({ createdAt: -1 }).limit(7);
+    const debates = await Debate.find(query).sort({ createdAt: -1 }).limit(5).select('debateTopic userRole createdAt adjudicationResult');
 
     if (debates.length === 0 && questionHistory.length === 0) {
       return res.json({
@@ -228,7 +223,7 @@ CONTEXT:
       context: context,
       question: question,
     });
-    
+
     res.json({ success: true, reply: result.content });
 
   } catch (error) {
