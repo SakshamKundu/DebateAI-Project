@@ -16,7 +16,7 @@ import mongoose from 'mongoose';
 
 // --- RAG INTEGRATION START ---
 // LangChain Document Loading & Splitting
-import { DirectoryLoader } from "langchain/document_loaders/fs/directory";
+// MODIFIED: No longer need DirectoryLoader as we will load from memory
 import { TextLoader } from "langchain/document_loaders/fs/text";
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
@@ -26,61 +26,74 @@ import { HuggingFaceTransformersEmbeddings } from "@langchain/community/embeddin
 import { FaissStore } from "@langchain/community/vectorstores/faiss";
 
 // RAG Configuration
-const BASE_DOCUMENTS_FOLDER = "src/server/reference_papers";
-const BASE_VECTOR_STORE_PATH = "src/server/faiss_index";
+// REMOVED: Local filesystem paths are no longer the primary source.
+// const BASE_DOCUMENTS_FOLDER = "src/server/reference_papers";
+// const BASE_VECTOR_STORE_PATH = "src/server/faiss_index";
 const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 
+// MODIFIED: In-memory cache for uploaded files per session.
+// This map will store files temporarily between the HTTP upload and the WebSocket connection.
+// Key: clientId, Value: array of file objects from multer { originalname, buffer, mimetype }
+const uploadedFileCache = new Map();
+
+
 /**
- * MODIFIED: Creates or loads a FAISS vector store FOR A SPECIFIC SESSION.
- * This is run for each new debate session.
+ * MODIFIED: Creates an in-memory FAISS vector store for a specific session from cached files.
+ * This function no longer reads from or writes to the local filesystem, making it deployment-ready.
  * @param {string} clientId The unique ID for the current debate session.
  * @returns {Promise<FaissStore|null>} The initialized vector store for the session, or null if no documents.
  */
 async function getVectorStore(clientId) {
-  console.log(`[RAG for ${clientId}] Initializing session-specific document store...`);
-  const embeddings = new HuggingFaceTransformersEmbeddings({ modelName: EMBEDDING_MODEL });
+  console.log(`[RAG for ${clientId}] Initializing session-specific document store from memory...`);
   
-  const sessionVectorStorePath = path.join(BASE_VECTOR_STORE_PATH, clientId);
-  const sessionDocumentsFolder = path.join(BASE_DOCUMENTS_FOLDER, clientId);
+  // REMOVED: Logic for loading a pre-existing vector store from disk is removed.
+  // The store will be built from scratch in memory for every session.
 
-  if (fs.existsSync(sessionVectorStorePath)) {
-    console.log(`[RAG for ${clientId}] ✅ Loading existing session vector store from disk...`);
-    return await FaissStore.load(sessionVectorStorePath, embeddings);
-  }
+  const files = uploadedFileCache.get(clientId);
 
-  console.log(`[RAG for ${clientId}] ⏳ No existing vector store found. Creating a new one...`);
-
-  if (!fs.existsSync(sessionDocumentsFolder)) {
-    console.warn(`[RAG for ${clientId}] ⚠️ No document folder found. The agents will not have any external context for this session.`);
+  if (!files || files.length === 0) {
+    console.warn(`[RAG for ${clientId}] ⚠️ No documents found in cache. The agents will not have any external context for this session.`);
     return null;
   }
 
-  console.log(`[RAG for ${clientId}] - Loading documents...`);
-  const loader = new DirectoryLoader(sessionDocumentsFolder, {
-    ".pdf": (path) => new PDFLoader(path, { splitPages: false }),
-    ".txt": (path) => new TextLoader(path),
-  });
-  const docs = await loader.load();
+  console.log(`[RAG for ${clientId}] - Loading ${files.length} document(s) from memory cache...`);
+  const embeddings = new HuggingFaceTransformersEmbeddings({ modelName: EMBEDDING_MODEL });
+  const docs = [];
+
+  for (const file of files) {
+    try {
+        // Create a Blob from the buffer to be used by LangChain loaders
+        const blob = new Blob([file.buffer], { type: file.mimetype });
+        const loader = file.mimetype === 'application/pdf' 
+            ? new PDFLoader(blob, { splitPages: true }) 
+            : new TextLoader(blob);
+        
+        const loadedDocs = [];
+      for await (const doc of loader.lazy_load()) {
+        doc.metadata.source = file.originalname; // Add filename to metadata
+        loadedDocs.push(doc);
+      }
+      docs.push(...loadedDocs);
+    } catch (error) {
+        console.error(`[RAG for ${clientId}] Error loading file ${file.originalname} from buffer:`, error);
+    }
+  }
 
   if (docs.length === 0) {
-     console.warn(`[RAG for ${clientId}] ⚠️ No documents found in the session folder. The agents will not have any external context.`);
+     console.warn(`[RAG for ${clientId}] ⚠️ Could not load any documents. The agents will not have any external context.`);
      return null;
   }
-  console.log(`[RAG for ${clientId}] - Loaded ${docs.length} document(s).`);
 
   console.log(`[RAG for ${clientId}] - Splitting documents into chunks...`);
-  const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 200 });
+  const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 500, chunkOverlap: 100 });
   const chunks = await splitter.splitDocuments(docs);
   console.log(`[RAG for ${clientId}] - Created ${chunks.length} document chunks.`);
 
-  console.log(`[RAG for ${clientId}] - Generating embeddings and creating FAISS vector store (this may take a moment)...`);
+  console.log(`[RAG for ${clientId}] - Generating embeddings and creating in-memory FAISS vector store...`);
   const store = await FaissStore.fromDocuments(chunks, embeddings);
   
-  if (!fs.existsSync(BASE_VECTOR_STORE_PATH)) {
-      fs.mkdirSync(BASE_VECTOR_STORE_PATH, { recursive: true });
-  }
-  await store.save(sessionVectorStorePath);
-  console.log(`[RAG for ${clientId}] ✅ Vector store created and saved to '${sessionVectorStorePath}'.`);
+  // REMOVED: Saving the vector store to disk is no longer needed.
+  console.log(`[RAG for ${clientId}] ✅ In-memory vector store created successfully.`);
 
   return store;
 }
@@ -388,7 +401,7 @@ class VoiceAgent {
         const relevantDocs = await retriever.getRelevantDocuments(mainInput);
 
         if (relevantDocs.length > 0) {
-          retrievedContext = relevantDocs.map((doc, i) => `Source ${i+1}: ${doc.pageContent}`).join("\n\n");
+          retrievedContext = relevantDocs.map((doc, i) => `Source ${i+1} (${doc.metadata.source || 'Unknown'}): ${doc.pageContent}`).join("\n\n");
           console.log(`[RAG] Found ${relevantDocs.length} relevant document chunks.`);
         } else {
           console.log(`[RAG] No relevant documents found for the input.`);
@@ -1285,26 +1298,17 @@ class UnifiedConnectionManager {
       this.deepgram.removeAllListeners();
     }
     
-    // --- MONGO DB INTEGRATION ---
-    // Save the debate record to MongoDB before deleting local files
     try {
-        // Only save if the debate has actually started (more than 1 message)
         if (this.conversationContext.messages.length > 1) {
             console.log(`[DB Save for ${this.clientId}] Preparing to save debate record.`);
 
-            const sessionDocsPath = path.join(BASE_DOCUMENTS_FOLDER, this.clientId);
-            const uploadedFiles = [];
-
-            if (fs.existsSync(sessionDocsPath)) {
-                const filenames = await fs.promises.readdir(sessionDocsPath);
-                for (const filename of filenames) {
-                    const filePath = path.join(sessionDocsPath, filename);
-                    const fileData = await fs.promises.readFile(filePath);
-                    // A simple way to guess mimetype
-                    const mimetype = path.extname(filename) === '.pdf' ? 'application/pdf' : 'text/plain';
-                    uploadedFiles.push({ filename, data: fileData, mimetype });
-                }
-            }
+            // MODIFIED: Get uploaded files from the in-memory cache instead of the filesystem.
+            const cachedFiles = uploadedFileCache.get(this.clientId) || [];
+            const filesToSave = cachedFiles.map(file => ({
+                filename: file.originalname,
+                data: file.buffer,
+                mimetype: file.mimetype
+            }));
 
             const debateRecord = new Debate({
                 clientId: this.clientId,
@@ -1312,7 +1316,7 @@ class UnifiedConnectionManager {
                 userRole: this.turnManager.userRole,
                 chatHistory: this.conversationContext.messages,
                 adjudicationResult: this.lastAdjudicationResult,
-                uploadedFiles: uploadedFiles
+                uploadedFiles: filesToSave
             });
 
             await debateRecord.save();
@@ -1323,29 +1327,13 @@ class UnifiedConnectionManager {
     } catch (error) {
         console.error(`[DB Save for ${this.clientId}] ❌ Error saving debate record to MongoDB:`, error);
     } finally {
-        // --- LOCAL FILE CLEANUP (runs regardless of DB save success) ---
-        try {
-            const sessionDocsPath = path.join(BASE_DOCUMENTS_FOLDER, this.clientId);
-            const sessionIndexPath = path.join(BASE_VECTOR_STORE_PATH, this.clientId);
-            
-            console.log(`[Cleanup for ${this.clientId}] Deleting session document folder: ${sessionDocsPath}`);
-            if (fs.existsSync(sessionDocsPath)) {
-                await fs.promises.rm(sessionDocsPath, { recursive: true, force: true });
-                console.log(`[Cleanup for ${this.clientId}] ✅ Session documents deleted.`);
-            } else {
-                console.log(`[Cleanup for ${this.clientId}] Session document folder not found, skipping.`);
-            }
-            
-            console.log(`[Cleanup for ${this.clientId}] Deleting session vector store index: ${sessionIndexPath}`);
-            if (fs.existsSync(sessionIndexPath)) {
-                await fs.promises.rm(sessionIndexPath, { recursive: true, force: true });
-                console.log(`[Cleanup for ${this.clientId}] ✅ Session vector store deleted.`);
-            } else {
-                console.log(`[Cleanup for ${this.clientId}] Session vector store not found, skipping.`);
-            }
-        } catch (error) {
-            console.error(`[Cleanup for ${this.clientId}] Error during file cleanup:`, error);
+        // MODIFIED: Clean up the in-memory cache for the client.
+        if (uploadedFileCache.has(this.clientId)) {
+            uploadedFileCache.delete(this.clientId);
+            console.log(`[Cleanup for ${this.clientId}] ✅ Cleared in-memory file cache.`);
         }
+
+        // REMOVED: Deleting local directories is no longer necessary.
     }
   }
 }
@@ -1466,23 +1454,8 @@ class VoiceAssistantApp {
     this.app.use(express.json());
     this.app.use(express.static("public/"));
 
-    // --- NEW: Multer configuration for file uploads ---
-    const storage = multer.diskStorage({
-        destination: (req, file, cb) => {
-            const clientId = req.body.clientId;
-            if (!clientId) {
-                return cb(new Error('Client ID is required for upload'), null);
-            }
-            const dir = path.join(BASE_DOCUMENTS_FOLDER, clientId);
-            fs.mkdirSync(dir, { recursive: true });
-            cb(null, dir);
-        },
-        filename: (req, file, cb) => {
-            // Sanitize filename to prevent directory traversal
-            const safeFilename = path.basename(file.originalname);
-            cb(null, safeFilename);
-        }
-    });
+    // MODIFIED: Use multer's memoryStorage to handle file uploads as buffers in memory, not on disk.
+    const storage = multer.memoryStorage();
     
     const upload = multer({ 
         storage: storage,
@@ -1497,9 +1470,19 @@ class VoiceAssistantApp {
     });
 
 
-    // --- NEW: File upload endpoint ---
+    // MODIFIED: File upload endpoint now saves files to the in-memory cache.
     this.app.post('/api/upload-papers', upload.array('papers', 10), (req, res) => {
-        res.status(200).json({ message: 'Files uploaded successfully!', files: req.files.map(f => f.originalname) });
+        const clientId = req.body.clientId;
+        if (!clientId) {
+            return res.status(400).json({ message: 'Client ID is required for upload' });
+        }
+        
+        // req.files is an array of files, each with a 'buffer' property.
+        // We store this array in our global cache, keyed by the clientId.
+        uploadedFileCache.set(clientId, req.files);
+        console.log(`[File Upload] Cached ${req.files.length} files for clientId: ${clientId}`);
+
+        res.status(200).json({ message: 'Files uploaded and cached successfully!', files: req.files.map(f => f.originalname) });
     }, (error, req, res, next) => {
         res.status(400).json({ message: error.message });
     });
@@ -1515,9 +1498,9 @@ class VoiceAssistantApp {
       }
     });
 
-    this.app.get("/", (req, res) => {
-      res.sendFile("/public/index.html");
-    });
+    // this.app.get("/", (req, res) => {
+    //   res.sendFile("/public/index.html");
+    // });
 
     this.app.post("/api/clear-context/:clientId", (req, res) => {
       // This route is likely obsolete with session-based context, but kept for compatibility
@@ -1721,7 +1704,7 @@ class VoiceAssistantApp {
 
 
 
-  start(port = 3001) {
+  start(port = process.env.PORT || 3001) {
     this.server.listen(port, () => {
       console.log(`Server is listening on port ${port}`);
       console.log('Environment check:');
@@ -1752,4 +1735,4 @@ const app = new VoiceAssistantApp();
  * @access  Public
  */
 
-app.start(3001);
+app.start();
